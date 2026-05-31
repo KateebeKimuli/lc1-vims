@@ -104,15 +104,41 @@ export default function Dashboard() {
           <h1 className="page-title">Dashboard</h1>
           <div className="page-sub">{format(new Date(), 'EEEE, d MMMM yyyy')}</div>
         </div>
-        <div style={{ display:'flex', gap:10, alignItems:'center' }}>
+        <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
+          {/* Online/offline badge */}
           <span className={`badge badge-${sync.online ? 'green' : 'gray'}`}>
             {sync.online ? '● Online' : '○ Offline'}
           </span>
-          {sync.pendingCount > 0 && (
-            <button className="btn btn-gold btn-sm"
-              onClick={sync.triggerSync} disabled={sync.isSyncing}>
-              {sync.isSyncing ? 'Syncing…' : `↑ Sync ${sync.pendingCount}`}
-            </button>
+
+          {/* Sync button — always visible, shows state */}
+          <button
+            className={`btn btn-sm ${sync.isSyncing ? 'btn-gold' : sync.error ? 'btn-danger' : sync.isConfigured ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={sync.triggerSync}
+            disabled={sync.isSyncing || !sync.online}
+            title={
+              !sync.isConfigured ? 'Configure Supabase in Settings → Sync & Backup' :
+              sync.error ? sync.error :
+              sync.lastSyncAt ? `Last synced: ${format(new Date(sync.lastSyncAt), 'dd/MM HH:mm')}` :
+              'Sync to cloud'
+            }
+          >
+            {sync.isSyncing
+              ? '⏳ Syncing…'
+              : !sync.isConfigured
+                ? '☁ Not configured'
+                : sync.error
+                  ? '✕ Sync error'
+                  : sync.lastSyncAt
+                    ? `☁ Synced ${format(new Date(sync.lastSyncAt), 'HH:mm')}`
+                    : '☁ Sync now'
+            }
+          </button>
+
+          {/* Show last push/pull counts after sync */}
+          {(sync.pushed > 0 || sync.pulled > 0) && !sync.isSyncing && (
+            <span style={{ fontSize:11, color:'var(--c-text3)' }}>
+              ↑{sync.pushed} ↓{sync.pulled}
+            </span>
           )}
         </div>
       </div>
@@ -263,15 +289,48 @@ export default function Dashboard() {
             </div>
           )}
 
-          {sync.lastSyncAt && (
-            <div className="card" style={{ marginTop:16 }}>
-              <div style={{ fontSize:12, color:'var(--c-text3)', marginBottom:4 }}>Last cloud sync</div>
-              <div style={{ fontSize:13, fontWeight:500 }}>
-                {format(new Date(sync.lastSyncAt), 'dd/MM/yyyy HH:mm')}
-              </div>
-              {sync.error && <div style={{ fontSize:12, color:'var(--c-red-l)', marginTop:6 }}>✕ {sync.error}</div>}
+          {/* Cloud sync status card */}
+          <div className="card" style={{ marginTop:16 }}>
+            <div style={{ fontSize:12, color:'var(--c-text3)', marginBottom:8, textTransform:'uppercase', letterSpacing:'0.04em' }}>
+              ☁ Cloud sync status
             </div>
-          )}
+            {!sync.isConfigured ? (
+              <div style={{ fontSize:12, color:'var(--c-text3)', lineHeight:1.6 }}>
+                Not configured.{' '}
+                <span style={{ color:'var(--c-green-xl)', cursor:'pointer', textDecoration:'underline' }}
+                  onClick={() => navigate('/settings')}>
+                  Set up in Settings →
+                </span>
+              </div>
+            ) : sync.isSyncing ? (
+              <div style={{ fontSize:13, color:'var(--c-gold-l)', fontWeight:600 }}>⏳ Syncing…</div>
+            ) : sync.error ? (
+              <div style={{ fontSize:12, color:'var(--c-red-l)', lineHeight:1.5 }}>✕ {sync.error}</div>
+            ) : sync.lastSyncAt ? (
+              <div>
+                <div style={{ fontSize:13, fontWeight:600, color:'var(--c-green-xl)' }}>
+                  ✓ Synced {format(new Date(sync.lastSyncAt), 'dd/MM/yyyy HH:mm')}
+                </div>
+                {(sync.pushed > 0 || sync.pulled > 0) && (
+                  <div style={{ fontSize:11, color:'var(--c-text3)', marginTop:3 }}>
+                    Last sync: ↑ {sync.pushed} pushed · ↓ {sync.pulled} pulled
+                  </div>
+                )}
+                <div style={{ fontSize:11, color:'var(--c-text3)', marginTop:2 }}>
+                  Auto-syncs every 30 seconds
+                </div>
+              </div>
+            ) : (
+              <div style={{ fontSize:12, color:'var(--c-text3)' }}>
+                Ready — click Sync now to push data
+              </div>
+            )}
+            <button className="btn btn-primary btn-sm" style={{ marginTop:10, width:'100%' }}
+              onClick={sync.triggerSync}
+              disabled={sync.isSyncing || !sync.online || !sync.isConfigured}>
+              {sync.isSyncing ? '⏳ Syncing…' : '↑ Sync now'}
+            </button>
+          </div>
 
           {/* Recent login history */}
           {loginHistory.length > 0 && (

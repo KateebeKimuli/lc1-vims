@@ -1,16 +1,17 @@
 # Dependencies
 node_modules/
+server/node_modules/
 **/node_modules/
 
-# Build outputs
+# Build output
 dist/
-build/
-.vite/
+dist-ssr/
 
-# Environment variables
+# Environment files — NEVER commit credentials
 .env
 .env.local
-.env.production
+.env.*.local
+server/.env
 
 # Logs
 *.log
@@ -21,12 +22,18 @@ yarn-debug.log*
 .DS_Store
 Thumbs.db
 
-# Temporary files
-*.tmp
-*.temp
-
-# IDE files
+# Editor
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# Vite cache
+.vite/
+vite.config.js.timestamp-*
+
+# Local test data
+*.local.json
+
+# Large assets (upload separately)
+# src/assets/officialLogo.js  ← included in repo

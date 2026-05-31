@@ -187,8 +187,9 @@ export function AuthProvider({ children }) {
     const { password: _pw, ...safeUserRec } = userRec
     const fullUser = {
       ...safeUserRec,
-      villageId:     villageProfile?.villageId    || '',
-      villageName:   villageProfile?.villageName  || '',
+      // System admin gets villageId='MASTER' so useVillageDB() knows to use master DB
+      villageId:     safeUserRec.isMasterAdmin ? 'MASTER' : (villageProfile?.villageId    || ''),
+      villageName:   safeUserRec.isMasterAdmin ? 'All Villages' : (villageProfile?.villageName  || ''),
       parishName:    villageProfile?.parishName   || '',
       subcountyName: villageProfile?.subcountyName|| '',
       countyName:    villageProfile?.countyName   || '',

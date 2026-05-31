@@ -179,11 +179,11 @@ export default function ReportsPage() {
   async function exportVillageRegister() {
     const doc = new jsPDF({ unit:'mm', format:'a4' })
     const vn  = user?.villageName || 'Village'
-    // Add logo if available
+    // Add logo if available — read from village-specific settings
     try {
-      const { getDB } = await import('../db/index.js')
-      const sdb    = await getDB()
-      const logoEn = await sdb.get('settings','officialLogo')
+      const { getVillageDB } = await import('../db/multiTenantDB.js')
+      const vdb    = await getVillageDB(user?.villageId)
+      const logoEn = await vdb.get('settings', 'officialLogo')
       if (logoEn?.value) {
         doc.addImage(logoEn.value, 'JPEG', 14, 8, 20, 20)
       }

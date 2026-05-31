@@ -15,7 +15,8 @@
  */
 
 import { useState, useEffect, useRef }  from 'react'
-import { getDB, isRoleAvailable, getActiveRoleHolder } from '../db'
+import { useVillageDB }                              from '../db/villageDB'
+import { getVillageDB }                              from '../db/multiTenantDB'
 import { v4 as uuidv4 }                 from 'uuid'
 import { LC1_ROLES }                    from '../data/roles'
 import { checkServerStatus, syncPendingRecords } from '../sync/syncEngine'
@@ -29,21 +30,26 @@ import { generateResetToken }           from '../db/multiTenantDB.js'
 import { hashPassword }                 from '../security/crypto.js'
 import { getAllowedSettingsTabs }        from '../data/roles'
 import { getSupabaseConfig, setSupabaseConfig, testSupabaseConnection, startAutoSync, syncVillage } from '../services/cloudSync'
+import { pushAllDataToSupabase } from '../services/dataMigration'
 import { promptSetupFolder, getSetupStatus, clearSetupFolder, isFSApiSupported, FOLDERS } from '../services/documentStorage.js'
 
 // ── Village info fields ────────────────────────────────────────────────────
-const VILLAGE_KEYS = [
-  { key: 'villageName',     label: 'Village name'            },
-  { key: 'parishName',      label: 'Parish'                  },
-  { key: 'subCountyName',   label: 'Sub-county'              },
-  { key: 'countyName',      label: 'County'                  },
-  { key: 'districtName',    label: 'District'                },
-  { key: 'chairName',       label: 'LC1 Chairperson name'    },
-  { key: 'secretaryName',   label: 'General Secretary name'  },
-  { key: 'treasurerName',   label: 'Sec. Finance name'       },
-  { key: 'officePhone',     label: 'Office phone number'     },
-  { key: 'officeEmail',     label: 'Office email'            },
-  { key: 'physicalAddress', label: 'Physical office address' },
+// Location fields — auto-filled from login session, read-only display
+const LOCATION_KEYS = [
+  { key: 'villageName',   label: 'Village name',  sessionKey: 'villageName'   },
+  { key: 'parishName',    label: 'Parish',         sessionKey: 'parishName'    },
+  { key: 'subCountyName', label: 'Sub-county',     sessionKey: 'subcountyName' },
+  { key: 'countyName',    label: 'County',         sessionKey: 'countyName'    },
+  { key: 'districtName',  label: 'District',       sessionKey: 'districtName'  },
+]
+// Name/contact fields — editable by the chairperson
+const NAME_KEYS = [
+  { key: 'chairName',       label: 'LC1 Chairperson full name'   },
+  { key: 'secretaryName',   label: 'General Secretary full name' },
+  { key: 'treasurerName',   label: 'Sec. Finance full name'      },
+  { key: 'officePhone',     label: 'Office phone number'         },
+  { key: 'officeEmail',     label: 'Office email address'        },
+  { key: 'physicalAddress', label: 'Physical office address'     },
 ]
 
 const EMPTY_USER = {
@@ -76,6 +82,7 @@ const ALL_TABS = [
 export default function SettingsPage() {
   const { user: currentUser } = useAuth()
   const { toast, showToast }  = useToast()
+  const db = useVillageDB()   // village-scoped DB — MUST be here
 
   // Active tab — default to 'village', but can be set externally via URL hash
   const [activeTab, setActiveTab] = useState('village')
@@ -95,6 +102,11 @@ export default function SettingsPage() {
   const [syncTesting2,  setSyncTesting2]  = useState(false)
   const [syncTestResult2,setSyncTestResult2] = useState(null)
   const [syncingNow,    setSyncingNow]    = useState(false)
+  const [migrating,     setMigrating]     = useState(false)
+  const [migrateLog,    setMigrateLog]    = useState([])
+  const [migrateResult, setMigrateResult] = useState(null)
+  const [wiping,        setWiping]        = useState(false)
+  const [wipeConfirm,   setWipeConfirm]   = useState(false)
 
   // User management modal
   const [userModal,    setUserModal]    = useState(false)
@@ -117,15 +129,25 @@ export default function SettingsPage() {
     setSupabaseUrl(sc.url || '')
     setSupabaseKey(sc.anonKey || '')
     setSyncEnabled(sc.enabled || false)
-  }, [])
+  }, [db.villageId])  // ← re-runs when village changes
 
   async function load() {
     try {
-      const db        = await getDB()
-      const allSettings = await db.getAll('settings')
-      const allUsers    = await db.getAll('users')
+      const [allSettings, allUsers] = await Promise.all([
+        db.getAll('settings'),
+        db.getAll('users'),
+      ])
       const s = {}
       allSettings.forEach(x => { s[x.key] = x.value })
+
+      // Auto-fill location from login session — these come from
+      // the Uganda locations database selected at login, always accurate
+      if (currentUser?.villageName)   s.villageName   = currentUser.villageName
+      if (currentUser?.parishName)    s.parishName    = currentUser.parishName
+      if (currentUser?.subcountyName) s.subCountyName = currentUser.subcountyName
+      if (currentUser?.countyName)    s.countyName    = currentUser.countyName
+      if (currentUser?.districtName)  s.districtName  = currentUser.districtName
+
       setSettings(s)
       setUsers(allUsers.sort((a, b) => (a.role || '').localeCompare(b.role || '')))
       setSyncUrl(s.syncServerUrl || '')
@@ -139,7 +161,6 @@ export default function SettingsPage() {
   // ── Village info save ──────────────────────────────────────────────────
   async function saveVillageSettings() {
     try {
-      const db = await getDB()
       for (const [key, value] of Object.entries(settings)) {
         await db.put('settings', { key, value })
       }
@@ -152,7 +173,6 @@ export default function SettingsPage() {
   // ── Logo save ──────────────────────────────────────────────────────────
   async function saveLogo(dataUrl) {
     try {
-      const db = await getDB()
       if (dataUrl) {
         await db.put('settings', { key: 'officialLogo', value: dataUrl })
       } else {
@@ -167,7 +187,6 @@ export default function SettingsPage() {
 
   // ── Sync config ────────────────────────────────────────────────────────
   async function saveSyncConfig() {
-    const db = await getDB()
     await db.put('settings', { key: 'syncServerUrl', value: syncUrl })
     await db.put('settings', { key: 'syncApiToken',  value: syncToken })
     showToast('Sync configuration saved')
@@ -193,19 +212,21 @@ export default function SettingsPage() {
     if (!editingUser && !userForm.password.trim()) { showToast('Password required', 'error'); return }
     if (!userForm.role)            { showToast('Select a council role', 'error'); return }
 
-    const available = await isRoleAvailable(userForm.role, editingUser)
-    if (!available) {
-      const holder = await getActiveRoleHolder(userForm.role)
-      showToast(`"${userForm.role.replace(/_/g,' ')}" is held by ${holder?.fullName}. Retire them first.`, 'error')
+    // Check if role is available within this village's users
+    const villageUsers = await db.getAll('users')
+    const existingHolder = villageUsers.find(u =>
+      u.role === userForm.role &&
+      u.userStatus === 'active' &&
+      u.id !== editingUser
+    )
+    if (existingHolder) {
+      showToast(`"${userForm.role.replace(/_/g,' ')}" is held by ${existingHolder.fullName}. Retire them first.`, 'error')
       return
     }
-
-    const db  = await getDB()
     const now = new Date().toISOString()
     try {
       if (editingUser) {
         const existing = await db.get('users', editingUser)
-        // Hash the new password if one was provided, otherwise keep existing
         const finalPw = userForm.password.trim()
           ? await hashPassword(userForm.password.trim())
           : existing.password
@@ -213,7 +234,6 @@ export default function SettingsPage() {
           password: finalPw, updatedAt: now })
         showToast('Committee member updated')
       } else {
-        // Hash password before storing — never store plain text
         const hashedPw = await hashPassword(userForm.password.trim())
         await db.add('users', { ...userForm, password: hashedPw, id: uuidv4(),
           userStatus: 'active', createdAt: now, updatedAt: now })
@@ -227,7 +247,6 @@ export default function SettingsPage() {
   }
 
   async function confirmRetire() {
-    const db = await getDB()
     const u  = await db.get('users', retireId)
     await db.put('users', { ...u, userStatus: retireReason, retiredAt: new Date().toISOString() })
     showToast(`${u.fullName} marked as "${retireReason}"`)
@@ -236,7 +255,6 @@ export default function SettingsPage() {
 
   // ── Data export / import ───────────────────────────────────────────────
   async function exportData() {
-    const db     = await getDB()
     const tables = ['residents','households','land','cases','meetings',
                     'births','deaths','letters','welfare','businesses','security']
     const data   = {}
@@ -258,7 +276,6 @@ export default function SettingsPage() {
     try {
       const text = await file.text()
       const data = JSON.parse(text)
-      const db   = await getDB()
       let count  = 0
       for (const [store, records] of Object.entries(data)) {
         for (const record of records) {
@@ -271,15 +288,49 @@ export default function SettingsPage() {
     e.target.value = ''
   }
 
+  // ── Wipe entire village database ──────────────────────────────────────────
+  async function wipeDatabase() {
+    setWiping(true)
+    try {
+      const stores = ['residents','households','land','cases','births','deaths',
+                      'meetings','letters','welfare','businesses','security',
+                      'audit','settings']
+      for (const store of stores) {
+        try {
+          const all = await db.getAll(store)
+          for (const rec of all) {
+            const key = rec.id || rec.key
+            if (key) await db.delete(store, key)
+          }
+        } catch {}
+      }
+      // Reset last pull timestamps
+      Object.keys(localStorage)
+        .filter(k => k.startsWith('lc1_last_pull_'))
+        .forEach(k => localStorage.removeItem(k))
+      showToast('✓ Database wiped — all records cleared', 'success')
+      setWipeConfirm(false)
+      load()
+    } catch (err) {
+      showToast('Wipe failed: ' + err.message, 'error')
+    }
+    setWiping(false)
+  }
+
   const statusColor = { active:'green', resigned:'gold', deceased:'gray', removed:'red', term_ended:'blue' }
 
   // ── Filter settings tabs based on role ────────────────────────────────────
-  // System admin sees ALL tabs; Chair/GenSec see only village + committee
+  // System admin (isMasterAdmin) sees ALL tabs
+  // Chair/GenSec see only village + committee
+  // While user loads, show all tabs temporarily to avoid blank screen
   const allowedTabIds = getAllowedSettingsTabs(currentUser)
   const TABS = ALL_TABS.filter(t => allowedTabIds.includes(t.id))
 
-  // If current activeTab is not in allowed tabs, snap to first allowed
-  const safeActiveTab = TABS.find(t => t.id === activeTab)?.id || TABS[0]?.id || 'village'
+  // If no tabs resolved yet (currentUser still loading), fall back to all
+  const visibleTabs = TABS.length > 0 ? TABS : ALL_TABS
+
+  // If current activeTab is not in visible tabs, snap to first available
+  const safeActiveTab = visibleTabs.find(t => t.id === activeTab)?.id || visibleTabs[0]?.id || 'village'
 
   // ── Render ─────────────────────────────────────────────────────────────
   return (
@@ -288,7 +339,7 @@ export default function SettingsPage() {
 
       {/* ── TAB BAR ── */}
       <div className="tabs" style={{ marginBottom: 28 }}>
-        {TABS.map(t => (
+        {visibleTabs.map(t => (
           <button
             key={t.id}
             className={`tab ${safeActiveTab === t.id ? 'active' : ''}`}
@@ -303,22 +354,50 @@ export default function SettingsPage() {
           TAB: VILLAGE INFO
       ══════════════════════════════════════════════════════ */}
       {safeActiveTab === 'village' && (
-        <div className="card" style={{ maxWidth: 640 }}>
-          <div className="section-title">Village information</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {VILLAGE_KEYS.map(({ key, label }) => (
-              <div key={key} className="form-group">
-                <label className="form-label">{label}</label>
-                <input
-                  className="form-input"
-                  value={settings[key] || ''}
-                  onChange={e => setSettings(prev => ({ ...prev, [key]: e.target.value }))}
-                />
-              </div>
-            ))}
-            <button className="btn btn-primary" style={{ marginTop: 8 }} onClick={saveVillageSettings}>
-              💾 Save village settings
-            </button>
+        <div style={{ maxWidth:640, display:'flex', flexDirection:'column', gap:20 }}>
+
+          {/* Location — auto-filled from login, read-only */}
+          <div className="card">
+            <div className="section-title">📍 Village location</div>
+            <div style={{ fontSize:12, color:'var(--c-text2)', marginBottom:14, lineHeight:1.6,
+              background:'rgba(45,122,79,0.08)', padding:'8px 12px', borderRadius:7,
+              border:'1px solid var(--c-green)' }}>
+              ✓ Location fields are automatically filled from your login session.
+              They update when you log in to a different village.
+            </div>
+            <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+              {LOCATION_KEYS.map(({ key, label }) => (
+                <div key={key} style={{ display:'flex', alignItems:'center', gap:12 }}>
+                  <label style={{ fontSize:12, color:'var(--c-text3)', width:110, flexShrink:0 }}>{label}</label>
+                  <div style={{
+                    flex:1, padding:'8px 12px', borderRadius:7,
+                    background:'var(--c-surface2)', border:'1px solid var(--c-border)',
+                    fontSize:13, fontWeight:600, color:'var(--c-text)',
+                  }}>
+                    {settings[key] || <span style={{ color:'var(--c-text3)', fontStyle:'italic' }}>Not set</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Names & contact — editable */}
+          <div className="card">
+            <div className="section-title">👥 Committee names &amp; contact</div>
+            <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+              {NAME_KEYS.map(({ key, label }) => (
+                <div key={key} className="form-group">
+                  <label className="form-label">{label}</label>
+                  <input className="form-input"
+                    value={settings[key] || ''}
+                    onChange={e => setSettings(prev => ({ ...prev, [key]: e.target.value }))}
+                    placeholder={label} />
+                </div>
+              ))}
+              <button className="btn btn-primary" style={{ marginTop:8 }} onClick={saveVillageSettings}>
+                💾 Save names &amp; contact details
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -568,6 +647,69 @@ CREATE POLICY "allow_all" ON lc1_sync_data FOR ALL USING (true);`}</pre>
                 }}>
                 {syncingNow ? '⏳ Syncing…' : '↺ Sync now'}
               </button>
+            </div>
+
+            {/* Push ALL local data to Supabase — one-time migration */}
+            <div style={{
+              marginTop:16, padding:'12px 14px',
+              background:'rgba(13,71,161,0.06)', border:'1px solid rgba(13,71,161,0.25)',
+              borderRadius:8
+            }}>
+              <div style={{ fontWeight:600, fontSize:13, marginBottom:6 }}>
+                📤 Push ALL local data to Supabase
+              </div>
+              <div style={{ fontSize:12, color:'var(--c-text2)', marginBottom:10, lineHeight:1.6 }}>
+                Reads every record from every village on this device and upserts it to Supabase.
+                Safe to run multiple times — existing records are updated, not duplicated.
+              </div>
+              <button className="btn btn-primary"
+                disabled={!supabaseUrl || !supabaseKey || migrating}
+                onClick={async () => {
+                  setMigrating(true); setMigrateLog([]); setMigrateResult(null)
+                  try {
+                    const result = await pushAllDataToSupabase((msg, count) => {
+                      setMigrateLog(prev => [...prev.slice(-8), `${msg} — ${count} pushed so far`])
+                    })
+                    setMigrateResult({ success: true, ...result })
+                    showToast(`✓ Pushed ${result.total} records to Supabase`)
+                  } catch (err) {
+                    setMigrateResult({ success: false, error: err.message })
+                    showToast('Push failed: ' + err.message, 'error')
+                  }
+                  setMigrating(false)
+                }}>
+                {migrating ? '⏳ Pushing…' : '📤 Push all data to Supabase now'}
+              </button>
+
+              {/* Live log */}
+              {migrateLog.length > 0 && (
+                <div style={{ marginTop:10, background:'#1a1a2e', borderRadius:6,
+                  padding:'8px 10px', fontSize:10, fontFamily:'monospace',
+                  color:'#a8d8a8', maxHeight:140, overflowY:'auto' }}>
+                  {migrateLog.map((line, i) => <div key={i}>{line}</div>)}
+                </div>
+              )}
+
+              {/* Result */}
+              {migrateResult && (
+                <div style={{
+                  marginTop:8, padding:'8px 12px', borderRadius:6, fontSize:12,
+                  background: migrateResult.success ? 'rgba(45,122,79,0.1)' : 'rgba(192,57,43,0.1)',
+                  border: `1px solid ${migrateResult.success ? 'var(--c-green)' : 'var(--c-red)'}`,
+                  color: migrateResult.success ? 'var(--c-green-xl)' : 'var(--c-red-l)',
+                }}>
+                  {migrateResult.success ? (
+                    <>
+                      ✓ Pushed {migrateResult.total} records total
+                      {Object.entries(migrateResult.byVillage).map(([v,n]) => (
+                        <div key={v} style={{ fontSize:11, marginTop:2 }}>
+                          📍 {v}: {n} records
+                        </div>
+                      ))}
+                    </>
+                  ) : `✕ ${migrateResult.error}`}
+                </div>
+              )}
             </div>
 
             {syncTestResult2 && (

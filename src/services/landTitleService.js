@@ -38,19 +38,20 @@ function getDB() { return import('../db/index.js').then(m => m.getDB()) }
 async function loadSettings(user = null) {
   const s = {}
 
-  // Legacy DB (lowest priority)
-  try {
-    const db  = await getDB()
-    const all = await db.getAll('settings')
-    all.forEach(x => { s[x.key] = x.value })
-  } catch {}
-
-  // Village-specific DB (overrides legacy)
+  // Village-specific DB (primary)
   if (user?.villageId && user.villageId !== 'MASTER') {
     try {
       const { getVillageDB } = await import('../db/multiTenantDB.js')
       const vdb = await getVillageDB(user.villageId)
       const all = await vdb.getAll('settings')
+      all.forEach(x => { s[x.key] = x.value })
+    } catch {}
+  }
+  // Legacy DB fallback
+  if (Object.keys(s).filter(k => k !== 'villageName').length === 0) {
+    try {
+      const db  = await getDB()
+      const all = await db.getAll('settings')
       all.forEach(x => { s[x.key] = x.value })
     } catch {}
   }

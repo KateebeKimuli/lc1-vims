@@ -12,6 +12,7 @@
  */
 
 import { useState, useEffect }             from 'react'
+import { useAuth }                         from '../hooks/useAuth'
 import { useVillageDB }                    from '../db/villageDB'
 import { verifyAuditChain }                from '../security/crypto.js'
 import { format }                          from 'date-fns'
@@ -49,10 +50,27 @@ const MODULE_LABELS = {
 }
 
 export default function AuditPage() {
+  // ── ALL hooks must be called before any conditional return (React rules) ──
   const db                   = useVillageDB()
   const { user }             = useAuth()
+  const { toast, showToast } = useToast()
 
-  // Audit log is ONLY accessible to System Administrator
+  const [entries,      setEntries]      = useState([])
+  const [users,        setUsers]        = useState({})
+  const [chainStatus,  setChainStatus]  = useState(null)
+  const [search,       setSearch]       = useState('')
+  const [actionFilter, setActionFilter] = useState('all')
+  const [tableFilter,  setTableFilter]  = useState('all')
+  const [loading,      setLoading]      = useState(true)
+  const [verifying,    setVerifying]    = useState(false)
+
+  // Load only when sysadmin and village changes
+  useEffect(() => {
+    if (user?.isMasterAdmin) load()
+    else setLoading(false)
+  }, [db.villageId, user?.isMasterAdmin])
+
+  // ── Guard: non-admin sees access denied (AFTER all hooks) ─────────────────
   if (user && !user.isMasterAdmin) {
     return (
       <div className="page" style={{ display:'flex', alignItems:'center', justifyContent:'center', minHeight:400 }}>
@@ -64,29 +82,36 @@ export default function AuditPage() {
       </div>
     )
   }
-  const { toast, showToast } = useToast()
-
-  const [entries,      setEntries]      = useState([])
-  const [users,        setUsers]        = useState({})
-  const [chainStatus,  setChainStatus]  = useState(null)   // ← was MISSING — caused blank page
-  const [search,       setSearch]       = useState('')
-  const [actionFilter, setActionFilter] = useState('all')
-  const [tableFilter,  setTableFilter]  = useState('all')
-  const [loading,      setLoading]      = useState(true)
-  const [verifying,    setVerifying]    = useState(false)
-
-  // ── Load audit entries ───────────────────────────────────────────────────
-  useEffect(() => {
-    load()
-  }, [db.villageId])   // ← re-runs when village changes
 
   async function load() {
     setLoading(true)
     try {
-      const [audit, userList] = await Promise.all([
-        db.getAll('audit'),
-        db.getAll('users'),
-      ])
+      let audit    = []
+      let userList = []
+
+      if (user?.isMasterAdmin) {
+        // Sysadmin: load audit from ALL registered villages
+        const { getRegisteredVillages, getVillageDB: getVDB } = await import('../db/multiTenantDB.js')
+        const villages = await getRegisteredVillages()
+        for (const v of villages) {
+          try {
+            const vdb   = await getVDB(v.villageId)
+            const va    = await vdb.getAll('audit')
+            const vu    = await vdb.getAll('users')
+            // Tag each entry with village name for display
+            audit    = [...audit,    ...va.map(e => ({ ...e, _villageName: v.villageName }))]
+            userList = [...userList, ...vu]
+          } catch {}
+        }
+      } else {
+        // Normal user: load from their own village
+        const results = await Promise.all([
+          db.getAll('audit'),
+          db.getAll('users'),
+        ])
+        audit    = results[0]
+        userList = results[1]
+      }
 
       // Build userId → name map
       const userMap = {}
@@ -257,6 +282,7 @@ export default function AuditPage() {
                 <th>Date &amp; time</th>
                 <th>Action</th>
                 <th>Module</th>
+                {user?.isMasterAdmin && <th>Village</th>}
                 <th>Record</th>
                 <th>Performed by</th>
                 <th>Details</th>
@@ -265,40 +291,30 @@ export default function AuditPage() {
             <tbody>
               {filtered.map((e, i) => (
                 <tr key={e.id || i}>
-                  {/* Row number */}
                   <td style={{ color:'var(--c-text3)', fontSize:11, textAlign:'right' }}>
                     {entries.length - entries.indexOf(e)}
                   </td>
-
-                  {/* Timestamp */}
                   <td style={{ fontSize:12, whiteSpace:'nowrap' }}>
-                    {e.timestamp
-                      ? format(new Date(e.timestamp), 'dd/MM/yyyy HH:mm:ss')
-                      : '—'}
+                    {e.timestamp ? format(new Date(e.timestamp), 'dd/MM/yyyy HH:mm:ss') : '—'}
                   </td>
-
-                  {/* Action badge */}
                   <td>
                     <span className={`badge badge-${ACTION_COLORS[e.action] || 'gray'}`}>
                       {e.action || '—'}
                     </span>
                   </td>
-
-                  {/* Module */}
                   <td>
                     <span style={{ fontSize:12, color:'var(--c-text2)' }}>
                       {MODULE_LABELS[e.table] || e.table || '—'}
                     </span>
                   </td>
-
-                  {/* Record ID (truncated) */}
+                  {user?.isMasterAdmin && (
+                    <td style={{ fontSize:11, color:'var(--c-text3)' }}>
+                      {e._villageName || e.villageId || '—'}
+                    </td>
+                  )}
                   <td style={{ fontFamily:'monospace', fontSize:11, color:'var(--c-text3)' }}>
-                    {e.recordId
-                      ? (e.recordId.length > 13 ? e.recordId.slice(0,12) + '…' : e.recordId)
-                      : '—'}
+                    {e.recordId ? (e.recordId.length > 13 ? e.recordId.slice(0,12) + '…' : e.recordId) : '—'}
                   </td>
-
-                  {/* User */}
                   <td style={{ fontSize:13 }}>
                     {users[e.userId]
                       ? <strong>{users[e.userId]}</strong>
@@ -307,8 +323,6 @@ export default function AuditPage() {
                         : <span style={{ color:'var(--c-text3)' }}>System</span>
                     }
                   </td>
-
-                  {/* Details */}
                   <td style={{ fontSize:12, color:'var(--c-text2)', maxWidth:260 }}>
                     {e.details && Object.keys(e.details).length > 0
                       ? Object.entries(e.details)

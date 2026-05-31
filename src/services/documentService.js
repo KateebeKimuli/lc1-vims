@@ -95,20 +95,21 @@ async function loadLogoFromSettings() {
 async function loadSettingsMap(user = null) {
   const s = {}
 
-  // 3. Legacy DB (lowest priority)
-  try {
-    const { getDB } = await import('../db/index.js')
-    const db  = await getDB()
-    const all = await db.getAll('settings')
-    all.forEach(x => { s[x.key] = x.value })
-  } catch {}
-
-  // 2. Village-specific DB (overrides legacy)
+  // Village-specific DB (primary — always use this first)
   if (user?.villageId && user.villageId !== 'MASTER') {
     try {
       const { getVillageDB } = await import('../db/multiTenantDB.js')
       const vdb = await getVillageDB(user.villageId)
       const all = await vdb.getAll('settings')
+      all.forEach(x => { s[x.key] = x.value })
+    } catch {}
+  }
+  // Legacy DB fallback (only if no village DB settings found)
+  if (Object.keys(s).filter(k => k !== 'villageName').length === 0) {
+    try {
+      const { getDB } = await import('../db/index.js')
+      const db  = await getDB()
+      const all = await db.getAll('settings')
       all.forEach(x => { s[x.key] = x.value })
     } catch {}
   }

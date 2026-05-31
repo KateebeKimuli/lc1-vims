@@ -1,163 +1,197 @@
-# LC1 Village Information Management System
-### Ministry of Local Government — Republic of Uganda
+<div align="center">
+
+# 🏛️ LC1 Village Information Management System
+
+**LC1 VIMS** — A comprehensive offline-first digital governance platform for Uganda's Local Council 1 village authorities.
+
+[![Ministry of Local Government](https://img.shields.io/badge/Ministry-Local%20Government%20Uganda-006400?style=for-the-badge)](https://molg.go.ug)
+[![React](https://img.shields.io/badge/React-18-61DAFB?style=for-the-badge&logo=react)](https://reactjs.org)
+[![PWA](https://img.shields.io/badge/PWA-Offline%20First-5A0FC8?style=for-the-badge)](https://web.dev/progressive-web-apps/)
+[![Supabase](https://img.shields.io/badge/Supabase-Cloud%20Sync-3ECF8E?style=for-the-badge&logo=supabase)](https://supabase.com)
+[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
+
+*Submitted to the MoICT&NG Government Systems Prototype Showcase*
+
+</div>
 
 ---
 
-## What is in this folder
+## 📋 Overview
+
+LC1 VIMS digitises every core responsibility of Uganda's 60,000+ Local Council 1 village councils — from resident registration and land titling to civil registration, official letters, case management, and government analytics. It works **fully offline**, syncs automatically to the cloud when connectivity is available, and requires no specialist IT skills to operate.
+
+---
+
+## ✨ Features
+
+| Module | Description |
+|--------|-------------|
+| 👤 **Residents** | Full biodata registration with photo + fingerprint biometrics, cross-village NIN duplicate detection, affiliated resident support |
+| 📐 **Land Records** | Auto-generated plot numbers, feet-based sketch maps, village land title PDF issuance |
+| 👶 **Births** | Civil registration, birth certificate generation, SMS notification |
+| 📋 **Deaths** | Death registration, deceased identity permanent lock (prevents NIN reuse) |
+| ⚖️ **Cases** | Dispute management, case report PDF, hearing tracking |
+| 📄 **Letters** | Official letters and certificates on MoLG letterhead |
+| 🗣️ **Meetings** | Meeting minutes, attendance, bulk SMS notifications |
+| 🤝 **Welfare / PDM** | PDM beneficiary tracking, eligibility auto-report |
+| 🏪 **Businesses** | Business registration and licensing |
+| 🛡️ **Security** | Incident logging and escalation |
+| 📊 **Reports** | Live charts, age pyramid, data sieve filters, PDF exports |
+
+---
+
+## 🔒 Security Architecture
+
+- **Password hashing**: PBKDF2-SHA256, 310,000 iterations (OWASP 2023)
+- **Encryption at rest**: AES-256-GCM via Web Crypto API
+- **Session management**: 15-min inactivity timeout, 5-fail account lockout
+- **Tamper-evident audit log**: SHA-256 chained hash per entry
+- **Village isolation**: each village in a separate IndexedDB instance
+- **Deceased identity lock**: NIN + name+DOB permanently blocked after death
+- **RBAC**: 11 roles enforced at the database write layer
+
+---
+
+## 🗄️ Database Structure
 
 ```
-lc1-vims-v2/
-├── src/              ← The web application (React)
-├── server/           ← The SMS proxy server (Node.js)
-│   ├── smsProxy.js   ← The proxy server code
-│   ├── .env.example  ← Template for your credentials
-│   └── package.json
-├── index.html
-├── package.json
-└── vite.config.js
+Local (IndexedDB — browser-native, offline):
+  lc1-master          → village registry, system admin
+  lc1-village-{id}    → per-village: residents, land, cases,
+                        births, deaths, meetings, letters,
+                        welfare, businesses, security, audit
+
+Cloud (Supabase / PostgreSQL — optional sync):
+  lc1_residents, lc1_land, lc1_cases, lc1_births,
+  lc1_deaths, lc1_meetings, lc1_letters, lc1_welfare,
+  lc1_businesses, lc1_security, lc1_users, lc1_audit,
+  lc1_settings, lc1_households, lc1_villages
 ```
 
 ---
 
-## Part 1 — Run the web application
+## 🚀 Getting Started
 
-### Requirements
-- Node.js version 18 or newer (download from nodejs.org)
+### Prerequisites
+- Node.js 18+
+- npm 9+
 
-### Steps
+### Install and run
+
 ```bash
-# 1. Open a terminal in the lc1-vims-v2 folder
-cd lc1-vims-v2
+# Clone the repository
+git clone https://github.com/YOUR_USERNAME/lc1-vims.git
+cd lc1-vims
 
-# 2. Install dependencies (first time only)
+# Install dependencies
 npm install
 
-# 3. Start the development server
+# Start development server
 npm run dev
-
-# 4. Open your browser and go to:
-#    http://localhost:5173
-
-# 5. Default login: admin / lc1admin2024
-#    (Change this immediately in Settings → Users)
 ```
 
-### Build for production (to deploy on a server)
+Open `http://localhost:5173` in Chrome or Edge.
+
+### Build for production
+
 ```bash
 npm run build
-# This creates a dist/ folder you can deploy to any web server
+# Output in /dist — deploy to any static host
 ```
 
----
-
-## Part 2 — Set up SMS notifications
-
-SMS is sent via Africa's Talking (africastalking.com).
-You need an account there first — sign up free at africastalking.com.
-
-### Step 1 — Create your credentials file
-
-1. Go into the `server/` folder
-2. Find the file called `.env.example`
-3. Make a **copy** of it and name the copy exactly: `.env`
-   - On Windows: right-click → Copy → Paste → rename to `.env`
-   - On Linux/Mac: `cp .env.example .env`
-4. Open `.env` in any text editor (Notepad is fine)
-5. Fill in your details:
-
-```
-AT_USERNAME=your_africastalking_username
-AT_API_KEY=your_africastalking_api_key
-PORT=3001
-AT_SENDER_ID=MOLG-LC1
-```
-
-**Where to find these:**
-- Log in at account.africastalking.com
-- Your username appears in the top-left of the dashboard
-- API Key: go to Settings → API Key → click Generate
-
-### Step 2 — Install and start the proxy
-
-Open a **second terminal** (keep the web app terminal running separately):
+### SMS proxy server (optional — for SMS notifications)
 
 ```bash
-# Go into the server folder
-cd lc1-vims-v2/server
-
-# Install dependencies (first time only)
+cd server
 npm install
-
-# Start the proxy server
+cp .env.example .env
+# Edit .env with your Africa's Talking credentials
 npm start
 ```
 
-You should see:
-```
-✓  LC1 VIMS SMS Proxy is running
-   Health check : http://localhost:3001/health
-   SMS endpoint : http://localhost:3001/sms
-```
+---
 
-### Step 3 — Connect the app to the proxy
+## ☁️ Cloud Database Setup (Supabase)
 
-1. Open the LC1 app in your browser
-2. Go to **Settings → Integrations**
-3. Scroll to **SMS Notifications**
-4. In the **SMS Proxy URL** field, enter:
+1. Create a free project at [supabase.com](https://supabase.com)
+2. Go to **SQL Editor** and run the setup script:
    ```
-   http://localhost:3001/sms
+   database/LC1_VIMS_Supabase_Setup.sql
    ```
-5. Enter your AT Username, API Key, and Sender ID in the fields
-6. Click **Save SMS settings**
-7. Enter a phone number and click **Send test SMS**
+3. Copy your **Project URL** and **anon key** from Settings → API
+4. In LC1 VIMS: **Settings → ☁️ Sync & Backup → Supabase Cloud Database**
+5. Paste credentials, test connection, enable sync
 
 ---
 
-## Part 3 — Keep the proxy running automatically (optional)
+## 🔑 Default Login Credentials
 
-So the proxy restarts automatically if the computer reboots:
+> ⚠️ Change these immediately after first login in Settings → Committee
 
-```bash
-# Install PM2 (process manager)
-npm install -g pm2
+| Role | Username | Password |
+|------|----------|----------|
+| System Administrator | `sysadmin` | `MoLG@Uganda2024` |
+| Village Chairperson | `admin` | `lc1admin2024` |
 
-# Start the proxy with PM2
-cd lc1-vims-v2/server
-pm2 start smsProxy.js --name lc1-sms-proxy
+---
 
-# Save the process list
-pm2 save
+## 🏗️ Tech Stack
 
-# Set PM2 to start on system boot (follow the command it prints)
-pm2 startup
+| Layer | Technology |
+|-------|-----------|
+| Frontend | React 18 + Vite 5 |
+| Language | JavaScript ES2022 |
+| Local DB | IndexedDB (idb v8) |
+| Cloud DB | Supabase (PostgreSQL) |
+| Crypto | Web Crypto API (browser-native) |
+| PDF | jsPDF + jsPDF-AutoTable |
+| PWA | vite-plugin-pwa + Workbox |
+| SMS | Africa's Talking (Node.js proxy) |
+| Charts | Custom SVG (zero dependencies) |
+
+---
+
+## 📁 Project Structure
+
+```
+lc1-vims/
+├── src/
+│   ├── assets/          — Logo and static assets
+│   ├── components/      — Shared UI components
+│   │   ├── charts/      — SVG chart components
+│   │   ├── land/        — Sketch map component
+│   │   ├── layout/      — Sidebar and layout
+│   │   └── shared/      — Buttons, modals, identity card
+│   ├── data/            — Uganda locations, roles, permissions
+│   ├── db/              — IndexedDB layer (offline-first)
+│   ├── hooks/           — useAuth, useSyncStatus
+│   ├── pages/           — All 18 application pages
+│   ├── security/        — Crypto, session, RBAC
+│   └── services/        — PDF generation, cloud sync, SMS
+├── server/              — Node.js SMS proxy
+├── database/            — Supabase SQL setup script
+└── public/              — Icons, manifest
 ```
 
 ---
 
-## Default system credentials
+## 📜 Legal
 
-| Account | Username | Password |
-|---------|----------|----------|
-| Village Chairperson | admin | lc1admin2024 |
-| System Administrator | sysadmin | MoLG@Uganda2024 |
+Built for Uganda's LC1 village governance structure under the **Local Governments Act, Cap. 243** and the **Land Act, Cap. 227**.
 
-**Change both passwords immediately after first login.**
+Land titles issued by the system reference customary ownership certificates as recognised under Ugandan law.
 
 ---
 
-## Supported browsers
+## 🙏 Acknowledgements
 
-- Google Chrome (recommended)
-- Microsoft Edge
-- Mozilla Firefox
-- Any modern Android browser (works as an installable app)
+- Ministry of Local Government, Republic of Uganda
+- MoICT&NG Government Systems Prototype Showcase
+- Africa's Talking — SMS infrastructure
 
 ---
 
-## Works offline
-
-The system stores all data locally in your browser (IndexedDB).
-No internet is required to register residents, issue letters,
-or view records. Data syncs to the cloud when you go online,
-if a sync server is configured in Settings.
+<div align="center">
+<strong>Ministry of Local Government · Republic of Uganda</strong><br/>
+<em>Submitted to MoICT&NG Government Systems Prototype Showcase</em>
+</div>

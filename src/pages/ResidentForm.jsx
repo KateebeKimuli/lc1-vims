@@ -72,7 +72,16 @@ const TRIBES      = ['Baganda','Banyankore','Basoga','Bakiga','Iteso','Langi','A
 const MARITAL     = ['Single','Married','Widowed','Divorced','Separated']
 const OCCUPATIONS = ['Farmer','Teacher','Health worker','Trader/Vendor','Civil servant','Student','Casual labourer','Artisan','Boda-boda','Unemployed','Other']
 
-// ── Registration reasons ───────────────────────────────────────────────────
+// ── Complete nationalities list (Uganda first as default) ─────────────────
+const NATIONALITIES = [
+  'Ugandan',
+  'Kenyan','Tanzanian','Rwandan','Burundian','South Sudanese','Congolese (DRC)',
+  'Ethiopian','Somali','Sudanese','Eritrean','Djiboutian',
+  'Nigerian','Ghanaian','South African','Egyptian','Moroccan','Zambian',
+  'Zimbabwean','Malawian','Mozambican','Angolan','Namibian','Botswanan',
+  'American','British','Indian','Chinese','Pakistani','Bangladeshi',
+  'European (other)','Asian (other)','African (other)','Other',
+]
 // Each reason carries:
 //   label          — shown in the dropdown
 //   deductsFrom    — true = mark as 'migrated' in former village (they are LEAVING)
@@ -126,6 +135,7 @@ const EMPTY_FORM = {
   // Foreigner-specific fields (only shown when nationality is not Ugandan)
   passportNumber:  '',   // passport number
   passportExpiry:  '',   // passport expiry date
+  passportCopy:    '',   // base64 scan/photo of passport
   permitType:      '',   // work permit, student visa, refugee, etc.
   permitNumber:    '',   // permit/visa reference number
   permitExpiry:    '',   // permit expiry date
@@ -1208,8 +1218,10 @@ export default function ResidentForm() {
                   </div>
                   <div className="form-group">
                     <label className="form-label">Nationality</label>
-                    <input className="form-input" value={form.nationality}
-                      onChange={e => set('nationality', e.target.value)} placeholder="Ugandan" />
+                    <select className="form-select" value={form.nationality}
+                      onChange={e => set('nationality', e.target.value)}>
+                      {NATIONALITIES.map(n => <option key={n} value={n}>{n}</option>)}
+                    </select>
                   </div>
                 </div>
 
@@ -1283,6 +1295,45 @@ export default function ResidentForm() {
                             ⚠ This permit/visa appears to have expired. Verify current immigration status.
                           </div>
                         )}
+                      </div>
+
+                      {/* Passport copy upload */}
+                      <div className="form-group">
+                        <label className="form-label">Passport copy (scan or photo)</label>
+                        {form.passportCopy ? (
+                          <div style={{ display:'flex', gap:10, alignItems:'center' }}>
+                            <img src={form.passportCopy} alt="Passport"
+                              style={{ width:120, height:80, objectFit:'cover', borderRadius:6,
+                                border:'1px solid var(--c-border)' }} />
+                            <button type="button" className="btn btn-danger btn-sm"
+                              onClick={() => set('passportCopy', '')}>Remove</button>
+                          </div>
+                        ) : (
+                          <label style={{ cursor:'pointer' }}>
+                            <div style={{
+                              border:'2px dashed var(--c-gold)', borderRadius:8, padding:'14px 18px',
+                              textAlign:'center', fontSize:13, color:'var(--c-gold-l)',
+                              background:'rgba(200,151,43,0.06)',
+                            }}>
+                              📄 Click to upload passport scan or photo
+                            </div>
+                            <input type="file" accept="image/*,application/pdf" style={{ display:'none' }}
+                              onChange={async e => {
+                                const file = e.target.files[0]
+                                if (!file) return
+                                if (file.size > 3 * 1024 * 1024) {
+                                  alert('File too large — maximum 3MB. Please compress the image.')
+                                  return
+                                }
+                                const reader = new FileReader()
+                                reader.onload = ev => set('passportCopy', ev.target.result)
+                                reader.readAsDataURL(file)
+                              }} />
+                          </label>
+                        )}
+                        <div style={{ fontSize:11, color:'var(--c-text3)', marginTop:4 }}>
+                          Accepted: JPG, PNG, PDF · Max 3MB
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1363,45 +1414,6 @@ export default function ResidentForm() {
                   <label className="form-label">Email (optional)</label>
                   <input className="form-input" type="email" inputMode="email" value={form.email}
                     onChange={e => set('email', e.target.value)} placeholder="example@email.com" autoComplete="email" />
-                </div>
-              </div>
-            </div>
-
-            {/* ── CURRENT ADDRESS (within this village) ── */}
-            <div className="card">
-              <div className="section-title">Current address</div>
-              <div style={{
-                background:'rgba(45,122,79,0.08)', border:'1px solid var(--c-green)',
-                borderRadius:8, padding:'10px 14px', marginBottom:14, fontSize:13, color:'var(--c-text2)'
-              }}>
-                📍 <strong style={{ color:'var(--c-green-xl)' }}>{user?.villageName || '—'} Village</strong>
-                {user?.parishName && ` · ${user.parishName} Parish`}
-                {user?.districtName && ` · ${user.districtName} District`}
-                <div style={{ fontSize:11, color:'var(--c-text3)', marginTop:3 }}>
-                  The village above is auto-set from your login context.
-                  Fill in the specific location within the village below.
-                </div>
-              </div>
-              <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
-                <div className="form-row">
-                  <div className="form-group">
-                    <label className="form-label">Zone / Cell / LC1 area</label>
-                    <input className="form-input" value={form.zone}
-                      onChange={e => set('zone', e.target.value)}
-                      placeholder="e.g. Zone A, Cell 3, Kisenyi" />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">Date arrived in this village</label>
-                    <input className="form-input" type="date" value={form.dateArrived}
-                      onChange={e => set('dateArrived', e.target.value)}
-                      max={new Date().toISOString().slice(0,10)} />
-                  </div>
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Detailed physical address</label>
-                  <input className="form-input" value={form.physicalAddress}
-                    onChange={e => set('physicalAddress', e.target.value)}
-                    placeholder="Plot number, street, landmark" />
                 </div>
               </div>
             </div>

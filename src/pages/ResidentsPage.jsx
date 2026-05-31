@@ -388,12 +388,9 @@ export default function ResidentsPage() {
                   {canWrite('residents') && (
                     <td onClick={e => e.stopPropagation()}>
                       <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
-                        <button
-                          className="btn btn-gold btn-sm"
-                          title="Generate identity card"
-                          onClick={() => setCardResident(r)}
-                        >
-                          🪪
+                        <button className="btn btn-primary btn-sm"
+                          onClick={() => navigate(`/residents/${r.id}${user?.isMasterAdmin && r.villageId ? '?vid=' + r.villageId : ''}`)}>
+                          👁 View
                         </button>
                         <button className="btn btn-secondary btn-sm"
                           onClick={() => navigate(`/residents/${r.id}/edit`)}>

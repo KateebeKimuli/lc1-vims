@@ -42,7 +42,6 @@ import { notifyBirthRegistered }         from '../services/smsService.js'
 import RichTextEditor from '../components/shared/RichTextEditor'
 import { v4 as uuidv4 }                  from 'uuid'
 import { format }                        from 'date-fns'
-import { logAudit }                      from '../db'
 
 // ── FIX: Added childSurname and motherPhone to EMPTY_BIRTH ────────────────
 const EMPTY_BIRTH = {
@@ -139,7 +138,7 @@ export default function BirthsPage() {
       if (editing) await db.put('births', record)
       else         await db.add('births', record)
 
-      await logAudit(editing ? 'UPDATE' : 'CREATE', 'births', record.id, user?.id,
+      await db.audit(editing ? 'UPDATE' : 'CREATE', 'births', record.id, user?.id,
         { childName: record.childName, childSurname: record.childSurname })
 
       // ── Auto-create resident from birth (new births only) ─────────────
