@@ -1,0 +1,3 @@
+# Never commit credentials to version control
+.env
+node_modules/
