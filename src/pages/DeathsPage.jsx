@@ -95,7 +95,14 @@ export default function DeathsPage() {
                 <td>{r.burialLocation||'—'}</td>
                 <td>{r.reportedBy||'—'}</td>
                 <td><div style={{ display:'flex', gap:6 }}>
-                  <button className="btn btn-gold btn-sm" onClick={() => { const dec=residents.find(x=>x.id===r.residentId); generateDeathCertificate(r, dec, user).catch(()=>{}) }}>🖨️ Cert</button>
+                  <button className="btn btn-gold btn-sm" onClick={async () => {
+                  try {
+                    const dec = residents.find(x => x.id === r.residentId)
+                    await generateDeathCertificate(r, dec, user)
+                  } catch(err) {
+                    alert('Certificate error: ' + err.message)
+                  }
+                }}>🖨️ Cert</button>
                   <button className="btn btn-secondary btn-sm" onClick={() => { setForm({...EMPTY, ...r}); setEditing(r.id); setModal(true) }}>Edit</button>
                   <button className="btn btn-danger btn-sm" onClick={() => del(r.id)}>Del</button>
                 </div></td>

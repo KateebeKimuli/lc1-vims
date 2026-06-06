@@ -234,7 +234,13 @@ export default function BirthsPage() {
                   <td>
                     <div style={{ display:'flex', gap:5 }}>
                       <button className="btn btn-gold btn-sm"
-                        onClick={() => generateBirthCertificate(r, user).catch(()=>{})}>
+                        onClick={async () => {
+                          try {
+                            await generateBirthCertificate(r, user)
+                          } catch(err) {
+                            alert('Certificate error: ' + err.message)
+                          }
+                        }}>
                         🖨️
                       </button>
                       <button className="btn btn-secondary btn-sm" onClick={() => openEdit(r)}>Edit</button>

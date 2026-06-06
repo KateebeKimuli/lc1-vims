@@ -63,16 +63,35 @@ export const AT_SMS_ENDPOINT = '/messaging'
  */
 async function getSMSConfig() {
   try {
-    const { getDB } = await import('../db/index.js')
-    const db        = await getDB()
-    const username  = (await db.get('settings', 'atUsername'))?.value
-    const apiKey    = (await db.get('settings', 'atApiKey'))?.value
-    const proxyUrl  = (await db.get('settings', 'smsProxyUrl'))?.value  // YOUR backend proxy URL
-    const senderId  = (await db.get('settings', 'atSenderId'))?.value || 'MOLG-LC1'
-    const sandbox   = (await db.get('settings', 'atSandbox'))?.value === 'true'
+    // SMS config is device-wide (one proxy, one AT account) — stored centrally
+    // in the master DB so it's consistent across every village.
+    const { getMasterDB } = await import('../db/multiTenantDB.js')
+    const master = await getMasterDB()
+    let username = (await master.get('settings', 'atUsername'))?.value
+    let apiKey   = (await master.get('settings', 'atApiKey'))?.value
+    let proxyUrl = (await master.get('settings', 'smsProxyUrl'))?.value
+    let senderId = (await master.get('settings', 'atSenderId'))?.value
+    let sandbox  = (await master.get('settings', 'atSandbox'))?.value
+
+    // Fallback to legacy DB if not yet migrated
+    if (!username || !apiKey) {
+      const { getDB } = await import('../db/index.js')
+      const db        = await getDB()
+      username = username || (await db.get('settings', 'atUsername'))?.value
+      apiKey   = apiKey   || (await db.get('settings', 'atApiKey'))?.value
+      proxyUrl = proxyUrl || (await db.get('settings', 'smsProxyUrl'))?.value
+      senderId = senderId || (await db.get('settings', 'atSenderId'))?.value
+      sandbox  = sandbox  || (await db.get('settings', 'atSandbox'))?.value
+    }
 
     if (!username || !apiKey) return null
-    return { username, apiKey, proxyUrl: proxyUrl || '', senderId, sandbox }
+    return {
+      username,
+      apiKey,
+      proxyUrl: proxyUrl || '',
+      senderId: senderId || 'MOLG-LC1',
+      sandbox:  sandbox === 'true',
+    }
   } catch { return null }
 }
 

@@ -71,8 +71,10 @@ async function loadSettings(user = null) {
 
 async function loadLogo() {
   try {
-    const db    = await getDB()
-    const entry = await db.get('settings', 'officialLogo')
+    // Logo is stored centrally in master DB
+    const { getMasterDB } = await import('../db/multiTenantDB.js')
+    const masterDB = await getMasterDB()
+    const entry    = await masterDB.get('settings', 'officialLogo')
     if (entry?.value) return entry.value
     const { OFFICIAL_LOGO_BASE64 } = await import('../assets/officialLogo.js')
     return OFFICIAL_LOGO_BASE64

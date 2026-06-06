@@ -31,7 +31,17 @@ const EMPTY = {
   acquisitionDate: '', acquisitionMethod: '',
   boundaries: '', sketchMap: '',
   notes: '',
+  // ── Ownership history ──
+  // Array of { ownerName, ownerId, from, to, method, note }
+  // 'to' is null/'' for the current owner. Each transfer pushes the previous
+  // owner here with a 'to' date, and a fresh open-ended entry for the new owner.
+  ownershipHistory: [],
+  // Partition lineage — if this plot was split from a parent plot
+  parentPlot: '',          // plotNumber of the plot this was carved from
+  partitionedFrom: '',     // land record id of the parent
 }
+
+const TRANSFER_METHODS = ['Sale','Gift','Inheritance','Court order','Exchange','Surrender','Other']
 
 const USES    = ['Residential','Agricultural','Commercial','Industrial','Institutional','Mixed use','Forest/Wetland']
 const TITLES  = ['Freehold','Leasehold','Customary','Mailo','Kibanja','None / Untitled']
@@ -40,9 +50,10 @@ const UNITS   = ['acres','hectares','sq metres','perches','sq feet']
 
 // ── Tab definitions ─────────────────────────────────────────────────────────
 const MODAL_TABS = [
-  { id:'details',  label:'📋 Details'     },
-  { id:'sketch',   label:'🗺️ Sketch map'  },
-  { id:'notes',    label:'📝 Notes'       },
+  { id:'details',   label:'📋 Details'     },
+  { id:'ownership', label:'👥 Ownership'   },
+  { id:'sketch',    label:'🗺️ Sketch map'  },
+  { id:'notes',     label:'📝 Notes'       },
 ]
 
 export default function LandPage() {
@@ -60,6 +71,14 @@ export default function LandPage() {
   const [search,    setSearch]    = useState('')
   const [modalTab,  setModalTab]  = useState('details')
   const [exporting, setExporting] = useState(null)
+
+  // ── Transfer / inheritance / partition state ──────────────────────────────
+  const [transferPlot, setTransferPlot] = useState(null)   // land record being transferred
+  const [transfer, setTransfer] = useState({
+    newOwnerId: '', newOwnerName: '', method: 'Sale', date: '', note: '',
+  })
+  const [partitionPlot, setPartitionPlot] = useState(null) // land record being partitioned
+  const [partitions, setPartitions] = useState([])         // [{ heirId, heirName, size, note }]
 
   useEffect(() => { load() }, [db.villageId])
 
@@ -148,6 +167,159 @@ export default function LandPage() {
     await db.audit('DELETE','land',deleteId)
     showToast('Land record deleted')
     setDeleteId(null); load()
+  }
+
+  // ── Open transfer modal ────────────────────────────────────────────────────
+  function openTransfer(plot) {
+    setTransferPlot(plot)
+    setTransfer({
+      newOwnerId: '', newOwnerName: '', method: 'Sale',
+      date: new Date().toISOString().slice(0,10), note: '',
+    })
+  }
+
+  // ── Execute a transfer / sale / gift / inheritance of the whole plot ──────
+  async function confirmTransfer() {
+    const plot = transferPlot
+    if (!plot) return
+    if (!transfer.newOwnerName.trim()) { showToast('Enter the new owner', 'error'); return }
+
+    const now = new Date().toISOString()
+    const transferDate = transfer.date || now.slice(0,10)
+
+    // Build the history: close the current owner's entry, open the new owner's
+    const history = Array.isArray(plot.ownershipHistory) ? [...plot.ownershipHistory] : []
+    // If no history yet, seed it with the original owner as an open entry
+    if (history.length === 0 && plot.ownerName) {
+      history.push({
+        ownerName: plot.ownerName, ownerId: plot.ownerId || '',
+        from: plot.acquisitionDate || plot.createdAt?.slice(0,10) || '', to: '',
+        method: plot.acquisitionMethod || 'Original registration', note: '',
+      })
+    }
+    // Close the currently-open entry (the seller / deceased)
+    const openIdx = history.findIndex(h => !h.to)
+    if (openIdx >= 0) history[openIdx] = { ...history[openIdx], to: transferDate }
+    // Add the new owner as the open entry
+    history.push({
+      ownerName: transfer.newOwnerName, ownerId: transfer.newOwnerId || '',
+      from: transferDate, to: '',
+      method: transfer.method,
+      note: transfer.note || '',
+    })
+
+    const updated = {
+      ...plot,
+      ownerId:   transfer.newOwnerId || '',
+      ownerName: transfer.newOwnerName,
+      acquisitionMethod: transfer.method,
+      acquisitionDate:   transferDate,
+      ownershipHistory:  history,
+      status: 'registered',
+      updatedAt: now,
+    }
+    try {
+      await db.put('land', updated)
+      await db.audit('TRANSFER','land',plot.id, {
+        plot: plot.plotNumber, from: plot.ownerName,
+        to: transfer.newOwnerName, method: transfer.method,
+      })
+      showToast(`Plot ${plot.plotNumber} transferred to ${transfer.newOwnerName} (${transfer.method})`)
+      setTransferPlot(null); load()
+    } catch (err) { showToast('Transfer failed: ' + err.message, 'error') }
+  }
+
+  // ── Open partition modal (split one plot among heirs) ──────────────────────
+  function openPartition(plot) {
+    setPartitionPlot(plot)
+    setPartitions([
+      { heirId:'', heirName:'', size:'', note:'' },
+      { heirId:'', heirName:'', size:'', note:'' },
+    ])
+  }
+  function addPartitionRow() {
+    setPartitions(p => [...p, { heirId:'', heirName:'', size:'', note:'' }])
+  }
+  function removePartitionRow(i) {
+    setPartitions(p => p.filter((_, idx) => idx !== i))
+  }
+  function setPartitionField(i, field, value) {
+    setPartitions(p => p.map((row, idx) => idx === i ? { ...row, [field]: value } : row))
+  }
+
+  // ── Execute partition: create a child plot per heir, retire the parent ─────
+  async function confirmPartition() {
+    const parent = partitionPlot
+    if (!parent) return
+    const valid = partitions.filter(p => p.heirName.trim())
+    if (valid.length < 2) { showToast('Add at least two heirs to partition', 'error'); return }
+
+    const now = new Date().toISOString()
+    const today = now.slice(0,10)
+    try {
+      // Create a new child plot for each heir
+      let seq = records.length
+      for (let i = 0; i < valid.length; i++) {
+        const heir = valid[i]
+        seq += 1
+        const childPlotNumber = `${parent.plotNumber}-${String.fromCharCode(65 + i)}` // e.g. .../0001-A
+        const childTitleRef   = generateTitleRef(childPlotNumber)
+        const childHistory = [{
+          ownerName: heir.heirName, ownerId: heir.heirId || '',
+          from: today, to: '',
+          method: 'Inheritance (partition)',
+          note: `Partitioned from plot ${parent.plotNumber} (estate of ${parent.ownerName})`,
+        }]
+        const child = {
+          ...EMPTY,
+          id: uuidv4(),
+          plotNumber: childPlotNumber,
+          titleRef:   childTitleRef,
+          ownerId:    heir.heirId || '',
+          ownerName:  heir.heirName,
+          size:       heir.size || '',
+          unit:       parent.unit || 'acres',
+          use:        parent.use || 'Residential',
+          location:   parent.location || '',
+          village:    parent.village  || user?.villageName  || '',
+          parish:     parent.parish   || user?.parishName   || '',
+          district:   parent.district || user?.districtName || '',
+          titleType:  parent.titleType || '',
+          status:     'registered',
+          acquisitionDate:   today,
+          acquisitionMethod: 'Inheritance',
+          boundaries: heir.note || '',
+          ownershipHistory: childHistory,
+          parentPlot:       parent.plotNumber,
+          partitionedFrom:  parent.id,
+          notes: `Created by partition of ${parent.plotNumber} on ${today}.`,
+          createdAt: now, updatedAt: now,
+        }
+        await db.add('land', child)
+        await db.audit('CREATE','land',child.id, { plot: child.plotNumber, owner: child.ownerName, via:'partition' })
+      }
+
+      // Retire the parent plot — mark as partitioned, no longer an active holding
+      const parentHistory = Array.isArray(parent.ownershipHistory) ? [...parent.ownershipHistory] : []
+      const openIdx = parentHistory.findIndex(h => !h.to)
+      if (openIdx >= 0) parentHistory[openIdx] = { ...parentHistory[openIdx], to: today }
+      else if (parent.ownerName) parentHistory.push({
+        ownerName: parent.ownerName, ownerId: parent.ownerId || '',
+        from: parent.acquisitionDate || '', to: today,
+        method: parent.acquisitionMethod || 'Original registration', note: '',
+      })
+      await db.put('land', {
+        ...parent,
+        status: 'partitioned',
+        ownershipHistory: parentHistory,
+        notes: `${parent.notes ? parent.notes + ' · ' : ''}Partitioned into ${valid.length} plots on ${today} among heirs of ${parent.ownerName}.`,
+        updatedAt: now,
+      })
+      await db.audit('PARTITION','land',parent.id, { plot: parent.plotNumber, into: valid.length })
+
+      showToast(`Plot ${parent.plotNumber} partitioned into ${valid.length} plots for the heirs`)
+      setPartitionPlot(null); setPartitions([]); load()
+    } catch (err) { showToast('Partition failed: ' + err.message, 'error') }
   }
 
   // ── Generate title PDF ──────────────────────────────────────────────────
@@ -246,6 +418,20 @@ export default function LandPage() {
                   <td>
                     <div style={{ display:'flex', gap:4, flexWrap:'wrap' }}>
                       <button className="btn btn-secondary btn-sm" onClick={() => openEdit(r)}>Edit</button>
+                      {r.status !== 'partitioned' && (
+                        <>
+                          <button className="btn btn-primary btn-sm"
+                            onClick={() => openTransfer(r)}
+                            title="Record a sale, gift or inheritance of this whole plot">
+                            🔁 Transfer
+                          </button>
+                          <button className="btn btn-secondary btn-sm"
+                            onClick={() => openPartition(r)}
+                            title="Split this plot among heirs (e.g. on the owner's death)">
+                            ✂️ Partition
+                          </button>
+                        </>
+                      )}
                       <button className="btn btn-gold btn-sm"
                         onClick={() => handleGenerateTitle(r)}
                         disabled={!!exporting}
@@ -469,6 +655,68 @@ export default function LandPage() {
               </div>
             )}
 
+            {/* ── TAB: OWNERSHIP HISTORY ── */}
+            {modalTab === 'ownership' && (
+              <div>
+                <div style={{
+                  background:'rgba(45,122,79,0.08)', border:'1px solid var(--c-green)',
+                  borderRadius:8, padding:'10px 14px', marginBottom:16, fontSize:13, color:'var(--c-text2)', lineHeight:1.6,
+                }}>
+                  👥 The chain of ownership for this plot. Use <strong>Transfer / Sell</strong> on the
+                  records list to record a sale, gift, or inheritance, or <strong>Partition</strong> to
+                  split the plot among heirs.
+                </div>
+
+                {/* Current owner */}
+                <div style={{ marginBottom:16 }}>
+                  <div style={{ fontSize:12, color:'var(--c-text3)', marginBottom:4 }}>CURRENT OWNER</div>
+                  <div style={{ fontSize:16, fontWeight:700, color:'var(--c-green-xl)' }}>
+                    {form.ownerName || '—'}
+                  </div>
+                  {form.acquisitionDate && (
+                    <div style={{ fontSize:12, color:'var(--c-text3)' }}>
+                      Since {form.acquisitionDate} · via {form.acquisitionMethod || '—'}
+                    </div>
+                  )}
+                  {form.parentPlot && (
+                    <div style={{ fontSize:11, color:'var(--c-gold-l)', marginTop:3 }}>
+                      ⬇ Partitioned from plot {form.parentPlot}
+                    </div>
+                  )}
+                </div>
+
+                {/* History timeline */}
+                <div style={{ fontSize:12, color:'var(--c-text3)', marginBottom:8 }}>OWNERSHIP TIMELINE</div>
+                {(!form.ownershipHistory || form.ownershipHistory.length === 0) ? (
+                  <div style={{ fontSize:13, color:'var(--c-text3)', fontStyle:'italic', padding:'8px 0' }}>
+                    No prior owners recorded. The first transfer will start the history.
+                  </div>
+                ) : (
+                  <div style={{ position:'relative', paddingLeft:18 }}>
+                    {/* vertical line */}
+                    <div style={{ position:'absolute', left:5, top:6, bottom:6, width:2, background:'var(--c-border2)' }} />
+                    {[...form.ownershipHistory].reverse().map((h, i) => (
+                      <div key={i} style={{ position:'relative', marginBottom:14 }}>
+                        <div style={{
+                          position:'absolute', left:-16, top:3, width:10, height:10, borderRadius:'50%',
+                          background: h.to ? 'var(--c-text3)' : 'var(--c-green)',
+                          border:'2px solid var(--c-surface)',
+                        }} />
+                        <div style={{ fontSize:14, fontWeight:600 }}>
+                          {h.ownerName}
+                          {!h.to && <span style={{ fontSize:11, color:'var(--c-green-xl)', marginLeft:6 }}>● current</span>}
+                        </div>
+                        <div style={{ fontSize:12, color:'var(--c-text3)' }}>
+                          {h.from || '?'} → {h.to || 'present'} · {h.method || '—'}
+                        </div>
+                        {h.note && <div style={{ fontSize:12, color:'var(--c-text2)', marginTop:2 }}>{h.note}</div>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* ── TAB: SKETCH MAP ── */}
             {modalTab === 'sketch' && (
               <div>
@@ -522,6 +770,127 @@ export default function LandPage() {
         onConfirm={del}
         onCancel={() => setDeleteId(null)}
       />
+
+      {/* ── TRANSFER / SELL / INHERIT MODAL ── */}
+      {transferPlot && (
+        <div className="modal-overlay" onClick={() => setTransferPlot(null)}>
+          <div className="modal" style={{ maxWidth:480 }} onClick={e => e.stopPropagation()}>
+            <h2 style={{ marginBottom:4 }}>🔁 Transfer plot {transferPlot.plotNumber}</h2>
+            <p style={{ fontSize:13, color:'var(--c-text2)', marginBottom:16, lineHeight:1.6 }}>
+              Current owner: <strong>{transferPlot.ownerName || '—'}</strong>.
+              Record who it is passing to and how. The previous owner is kept in the plot's history.
+            </p>
+            <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
+              <div className="form-group">
+                <label className="form-label">New owner (registered resident)</label>
+                <select className="form-select" value={transfer.newOwnerId}
+                  onChange={e => {
+                    const r = residents.find(x => x.id === e.target.value)
+                    setTransfer(t => ({ ...t, newOwnerId: e.target.value, newOwnerName: r ? `${r.surname} ${r.firstName}` : t.newOwnerName }))
+                  }}>
+                  <option value="">— Select or type below —</option>
+                  {residents.map(r => <option key={r.id} value={r.id}>{r.surname} {r.firstName}</option>)}
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label">New owner name *</label>
+                <input className="form-input" value={transfer.newOwnerName}
+                  onChange={e => setTransfer(t => ({ ...t, newOwnerName: e.target.value }))}
+                  placeholder="Full name of new owner" />
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label className="form-label">Method</label>
+                  <select className="form-select" value={transfer.method}
+                    onChange={e => setTransfer(t => ({ ...t, method: e.target.value }))}>
+                    {TRANSFER_METHODS.map(m => <option key={m}>{m}</option>)}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Date</label>
+                  <input className="form-input" type="date" value={transfer.date}
+                    onChange={e => setTransfer(t => ({ ...t, date: e.target.value }))}
+                    max={new Date().toISOString().slice(0,10)} />
+                </div>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Note (optional)</label>
+                <input className="form-input" value={transfer.note}
+                  onChange={e => setTransfer(t => ({ ...t, note: e.target.value }))}
+                  placeholder="e.g. sale price, agreement ref, witness" />
+              </div>
+            </div>
+            <div style={{ display:'flex', gap:10, justifyContent:'flex-end', marginTop:20 }}>
+              <button className="btn btn-secondary" onClick={() => setTransferPlot(null)}>Cancel</button>
+              <button className="btn btn-primary" onClick={confirmTransfer}>Record transfer</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── PARTITION MODAL ── */}
+      {partitionPlot && (
+        <div className="modal-overlay" onClick={() => setPartitionPlot(null)}>
+          <div className="modal modal-lg" onClick={e => e.stopPropagation()}>
+            <h2 style={{ marginBottom:4 }}>✂️ Partition plot {partitionPlot.plotNumber}</h2>
+            <p style={{ fontSize:13, color:'var(--c-text2)', marginBottom:16, lineHeight:1.6 }}>
+              Split this plot (owner: <strong>{partitionPlot.ownerName || '—'}</strong>) into separate
+              plots for the heirs. Each heir gets a new plot numbered{' '}
+              <span style={{ fontFamily:'monospace' }}>{partitionPlot.plotNumber}-A</span>,{' '}
+              <span style={{ fontFamily:'monospace' }}>-B</span>, etc. The original plot is retired
+              and marked as <em>partitioned</em>, with its history preserved.
+            </p>
+            <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+              {partitions.map((p, i) => (
+                <div key={i} style={{
+                  display:'flex', gap:8, alignItems:'flex-end',
+                  padding:'10px', borderRadius:8, background:'var(--c-surface2)',
+                }}>
+                  <div style={{ fontFamily:'monospace', fontWeight:700, color:'var(--c-gold-l)', paddingBottom:8 }}>
+                    {partitionPlot.plotNumber}-{String.fromCharCode(65 + i)}
+                  </div>
+                  <div className="form-group" style={{ flex:2, marginBottom:0 }}>
+                    <label className="form-label" style={{ fontSize:11 }}>Heir</label>
+                    <select className="form-select" value={p.heirId}
+                      onChange={e => {
+                        const r = residents.find(x => x.id === e.target.value)
+                        setPartitionField(i, 'heirId', e.target.value)
+                        if (r) setPartitionField(i, 'heirName', `${r.surname} ${r.firstName}`)
+                      }}>
+                      <option value="">— Select heir —</option>
+                      {residents.map(r => <option key={r.id} value={r.id}>{r.surname} {r.firstName}</option>)}
+                    </select>
+                  </div>
+                  <div className="form-group" style={{ flex:2, marginBottom:0 }}>
+                    <label className="form-label" style={{ fontSize:11 }}>Name</label>
+                    <input className="form-input" value={p.heirName}
+                      onChange={e => setPartitionField(i, 'heirName', e.target.value)}
+                      placeholder="Heir name" />
+                  </div>
+                  <div className="form-group" style={{ flex:1, marginBottom:0 }}>
+                    <label className="form-label" style={{ fontSize:11 }}>Size ({partitionPlot.unit||'acres'})</label>
+                    <input className="form-input" value={p.size}
+                      onChange={e => setPartitionField(i, 'size', e.target.value)}
+                      placeholder="e.g. 0.5" inputMode="decimal" />
+                  </div>
+                  {partitions.length > 2 && (
+                    <button className="btn btn-danger btn-sm" style={{ marginBottom:2 }}
+                      onClick={() => removePartitionRow(i)}>✕</button>
+                  )}
+                </div>
+              ))}
+              <button className="btn btn-secondary btn-sm" style={{ alignSelf:'flex-start' }}
+                onClick={addPartitionRow}>+ Add another heir</button>
+            </div>
+            <div style={{ display:'flex', gap:10, justifyContent:'flex-end', marginTop:20 }}>
+              <button className="btn btn-secondary" onClick={() => setPartitionPlot(null)}>Cancel</button>
+              <button className="btn btn-primary" onClick={confirmPartition}>
+                ✂️ Partition into {partitions.filter(p => p.heirName.trim()).length} plots
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <Toast toast={toast} />
     </div>

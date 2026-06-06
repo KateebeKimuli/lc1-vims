@@ -14,9 +14,11 @@ import { NavLink, Outlet, useNavigate }   from 'react-router-dom'
 import { useAuth }                        from '../../hooks/useAuth'
 import { useSyncStatus }                  from '../../hooks/useSyncStatus'
 import { getRoleById }                    from '../../data/roles'
+import { getRegisteredVillages }          from '../../db/multiTenantDB'
 import MoLGLogo                           from '../../assets/MoLGLogo'
 import GlobalSearch                        from '../shared/GlobalSearch'
-
+import ConnectivityNotifier               from '../shared/ConnectivityNotifier'
+import { format } from 'date-fns'
 const ALL_NAV = [
   { to:'/',           icon:'⊞',  label:'Dashboard',   end:true },
   { to:'/residents',  icon:'👤', label:'Residents'              },
@@ -105,12 +107,15 @@ function TimeoutWarningModal({ secondsLeft, onStay, onLogout }) {
 
 // ── Main layout ────────────────────────────────────────────────────────────
 export default function Layout() {
-  const { user, logout, canAccessRoute, warningSeconds, extendSession } = useAuth()
+  const { user, logout, canAccessRoute, switchVillage, warningSeconds, extendSession } = useAuth()
   const navigate   = useNavigate()
   const sync       = useSyncStatus()
   const [collapsed,      setCollapsed]      = useState(false)
   const [searching,      setSearching]      = useState(false)
   const [confirmingLogout, setConfirmingLogout] = useState(false)
+  const [villages,         setVillages]         = useState([])
+  const [switcherOpen,     setSwitcherOpen]      = useState(false)
+  const [villageSearch,    setVillageSearch]     = useState('')
 
   const roleDef   = getRoleById(user?.role)
   const roleTitle = roleDef?.shortTitle || user?.role || ''
@@ -120,6 +125,13 @@ export default function Layout() {
   })
 
   // Show confirmation modal first — only actually logout on confirm
+  // Load all registered villages when sysadmin logs in
+  useEffect(() => {
+    if (user?.isMasterAdmin) {
+      getRegisteredVillages().then(setVillages).catch(() => {})
+    }
+  }, [user?.isMasterAdmin])
+
   function handleLogout()        { setConfirmingLogout(true) }
   function handleLogoutConfirm() { setConfirmingLogout(false); logout(); navigate('/login') }
   function handleLogoutCancel()  { setConfirmingLogout(false) }
@@ -228,7 +240,9 @@ export default function Layout() {
                 LC1 Village IMS
               </div>
               <div style={{ fontSize:10, color:'var(--c-green-xl)', marginTop:1 }}>
-                {user?.villageName ? `${user.villageName} Village` : 'MoLG Uganda'}
+                {user?.isMasterAdmin && user?.villageName !== 'All Villages'
+                ? `📍 ${user.villageName}`
+                : user?.villageName || 'MoLG Uganda'}
               </div>
             </div>
           )}
@@ -327,6 +341,108 @@ export default function Layout() {
             </div>
           )}
 
+          {/* Village switcher — System Admin only */}
+          {user?.isMasterAdmin && !collapsed && (
+            <div style={{ marginBottom:6 }}>
+              <button
+                onClick={() => setSwitcherOpen(p => !p)}
+                style={{
+                  width:'100%', padding:'8px 10px',
+                  background:'rgba(200,151,43,0.15)',
+                  border:'1px solid var(--c-gold)', borderRadius:8,
+                  color:'var(--c-gold-l)', fontSize:12, fontWeight:600,
+                  cursor:'pointer', display:'flex', justifyContent:'space-between', alignItems:'center',
+                }}>
+                <span>🏘 {user.villageId === 'MASTER' ? 'Select village…' : user.villageName}</span>
+                <span>{switcherOpen ? '▲' : '▼'}</span>
+              </button>
+              {switcherOpen && (
+                <div style={{
+                  background:'var(--c-surface)', border:'1px solid var(--c-border)',
+                  borderRadius:8, marginTop:4, boxShadow:'0 4px 20px rgba(0,0,0,0.3)',
+                }}>
+                  {/* Search input */}
+                  <div style={{ padding:'8px 8px 4px' }}>
+                    <input
+                      autoFocus
+                      placeholder="Search village…"
+                      style={{
+                        width:'100%', padding:'6px 10px', borderRadius:6, fontSize:12,
+                        border:'1px solid var(--c-border)', background:'var(--c-surface2)',
+                        color:'var(--c-text)', outline:'none', boxSizing:'border-box',
+                      }}
+                      value={villageSearch}
+                      onChange={e => setVillageSearch(e.target.value)}
+                    />
+                  </div>
+                  {/* Scrollable list */}
+                  <div style={{ maxHeight:200, overflowY:'auto' }}>
+                    {/* Master view */}
+                    {('master view all villages').includes(villageSearch.toLowerCase()) && (
+                      <button onClick={() => { switchVillage('MASTER','All Villages'); setSwitcherOpen(false); setVillageSearch('') }}
+                        style={{ width:'100%', padding:'7px 12px', background: user.villageId==='MASTER'?'rgba(45,122,79,0.1)':'none',
+                          border:'none', borderBottom:'1px solid var(--c-border)', cursor:'pointer',
+                          textAlign:'left', fontSize:12, fontWeight: user.villageId==='MASTER'?700:400, color:'var(--c-text)' }}>
+                        🌍 Master view (all villages)
+                      </button>
+                    )}
+                    {/* Filtered villages */}
+                    {villages
+                      .filter(v =>
+                        !villageSearch ||
+                        v.villageName?.toLowerCase().includes(villageSearch.toLowerCase()) ||
+                        v.districtName?.toLowerCase().includes(villageSearch.toLowerCase()) ||
+                        v.parishName?.toLowerCase().includes(villageSearch.toLowerCase())
+                      )
+                      .map(v => (
+                        <button key={v.villageId}
+                          onClick={() => {
+                            switchVillage(v.villageId, v.villageName, {
+                              parishName:    v.parishName    || '',
+                              districtName:  v.districtName  || '',
+                              subcountyName: v.subcountyName || '',
+                              countyName:    v.countyName    || '',
+                            })
+                            setSwitcherOpen(false)
+                            setVillageSearch('')
+                          }}
+                          style={{
+                            width:'100%', padding:'7px 12px',
+                            background: user.villageId===v.villageId ? 'rgba(45,122,79,0.1)' : 'none',
+                            border:'none', borderBottom:'1px solid var(--c-border)',
+                            cursor:'pointer', textAlign:'left', fontSize:12, color:'var(--c-text)',
+                            fontWeight: user.villageId===v.villageId ? 700 : 400,
+                          }}>
+                          📍 {v.villageName}
+                          {v.districtName && (
+                            <span style={{ fontSize:10, color:'var(--c-text3)', display:'block' }}>
+                              {v.parishName ? `${v.parishName} · ` : ''}{v.districtName}
+                            </span>
+                          )}
+                        </button>
+                      ))
+                    }
+                    {/* No results */}
+                    {villageSearch && villages.filter(v =>
+                      v.villageName?.toLowerCase().includes(villageSearch.toLowerCase()) ||
+                      v.districtName?.toLowerCase().includes(villageSearch.toLowerCase()) ||
+                      v.parishName?.toLowerCase().includes(villageSearch.toLowerCase())
+                    ).length === 0 && (
+                      <div style={{ padding:'10px 12px', fontSize:12, color:'var(--c-text3)', fontStyle:'italic' }}>
+                        No villages matching "{villageSearch}"
+                      </div>
+                    )}
+                    {!villageSearch && villages.length === 0 && (
+                      <div style={{ padding:'10px 12px', fontSize:12, color:'var(--c-text3)', fontStyle:'italic' }}>
+                        No villages registered on this device yet
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Sign out */}
           <button onClick={handleLogout} style={{
             width:'100%', padding:'7px 10px', border:'none',
@@ -354,8 +470,38 @@ export default function Layout() {
       </aside>
 
       {/* ── MAIN CONTENT ── */}
-      <main style={{ flex:1, overflowY:'auto', background:'var(--c-bg)' }}>
-        <Outlet />
+      <main style={{ flex:1, overflowY:'auto', background:'var(--c-bg)', display:'flex', flexDirection:'column' }}>
+        <ConnectivityNotifier />
+        {/* Sysadmin village context banner */}
+        {user?.isMasterAdmin && user?.villageId !== 'MASTER' && (
+          <div style={{
+            background:'rgba(200,151,43,0.12)', borderBottom:'2px solid var(--c-gold)',
+            padding:'8px 24px', fontSize:13, display:'flex', alignItems:'center',
+            justifyContent:'space-between', flexShrink:0,
+          }}>
+            <span>
+              🔧 <strong>System Admin</strong> — currently managing{' '}
+              <strong style={{ color:'var(--c-gold-l)' }}>{user.villageName} Village</strong>
+              {user.districtName && <span style={{ color:'var(--c-text3)', marginLeft:6 }}>· {user.districtName}</span>}
+            </span>
+            <button onClick={() => switchVillage('MASTER','All Villages')}
+              style={{ background:'none', border:'1px solid var(--c-gold)', borderRadius:6,
+                cursor:'pointer', color:'var(--c-gold-l)', fontSize:12, fontWeight:600, padding:'3px 10px' }}>
+              ← Back to all villages
+            </button>
+          </div>
+        )}
+        {user?.isMasterAdmin && user?.villageId === 'MASTER' && (
+          <div style={{
+            background:'rgba(200,151,43,0.08)', borderBottom:'1px solid var(--c-gold)',
+            padding:'6px 24px', fontSize:12, color:'var(--c-gold-l)', flexShrink:0,
+          }}>
+            🔧 System Administrator — <strong>select a village from the sidebar to manage it</strong>
+          </div>
+        )}
+        <div style={{ flex:1, overflowY:'auto' }}>
+          <Outlet />
+        </div>
       </main>
     </div>
   )

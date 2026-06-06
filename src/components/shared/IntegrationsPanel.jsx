@@ -58,6 +58,7 @@ export default function IntegrationsPanel() {
 
   // ── Government API state ──────────────────────────────────────────────
   const [govSettings, setGovSettings] = useState({})
+  const [govSandboxOn, setGovSandboxOn] = useState(false)
   const [govTesting,  setGovTesting]  = useState({})
 
   // ── Reset token state ─────────────────────────────────────────────────
@@ -71,10 +72,13 @@ export default function IntegrationsPanel() {
 
   async function loadSettings() {
     try {
+      const { getMasterDB } = await import('../../db/multiTenantDB.js')
+      const master = await getMasterDB()
       const db  = await getDB()
-      const all = await db.getAll('settings')
-      const s   = {}
-      all.forEach(x => { s[x.key] = x.value })
+      // Merge: master DB takes priority, legacy DB as fallback
+      const s = {}
+      ;(await db.getAll('settings')).forEach(x => { s[x.key] = x.value })
+      ;(await master.getAll('settings')).forEach(x => { s[x.key] = x.value })
 
       setAtUsername(s.atUsername  || '')
       setAtApiKey(s.atApiKey      || '')
@@ -91,6 +95,7 @@ export default function IntegrationsPanel() {
         }
       })
       setGovSettings(gs)
+      setGovSandboxOn(s.govSandbox === 'true')
     } catch (err) {
       showToast('Could not load integration settings', 'error')
     }
@@ -99,12 +104,14 @@ export default function IntegrationsPanel() {
   // ── Save all SMS settings ─────────────────────────────────────────────
   async function saveSMSSettings() {
     try {
-      const db = await getDB()
-      await db.put('settings', { key:'atUsername',  value: atUsername })
-      await db.put('settings', { key:'atApiKey',    value: atApiKey })
-      await db.put('settings', { key:'atSenderId',  value: atSenderId })
-      await db.put('settings', { key:'atSandbox',   value: String(atSandbox) })
-      await db.put('settings', { key:'smsProxyUrl', value: smsProxyUrl })
+      const { getMasterDB } = await import('../../db/multiTenantDB.js')
+      const master = await getMasterDB()
+      await master.put('settings', { key:'atUsername',  value: atUsername })
+      await master.put('settings', { key:'atApiKey',    value: atApiKey })
+      await master.put('settings', { key:'atSenderId',  value: atSenderId })
+      await master.put('settings', { key:'atSandbox',   value: String(atSandbox) })
+      await master.put('settings', { key:'smsProxyUrl', value: smsProxyUrl })
+      await master.put('settings', { key:'testPhone',   value: testPhone })
       showToast('SMS settings saved')
     } catch (err) {
       showToast('Save failed: ' + err.message, 'error')
@@ -214,12 +221,22 @@ export default function IntegrationsPanel() {
 
   // ── Save government API settings ──────────────────────────────────────
   async function saveGovSettings(apiId) {
-    const db  = await getDB()
+    const { getMasterDB } = await import('../../db/multiTenantDB.js')
+    const master = await getMasterDB()
     const api = GOV_INTEGRATION_LIST.find(a => a.id === apiId)
     if (!api) return
-    await db.put('settings', { key: api.tokenKey,   value: govSettings[apiId]?.token || '' })
-    await db.put('settings', { key: api.enabledKey, value: String(govSettings[apiId]?.enabled || false) })
+    await master.put('settings', { key: api.tokenKey,   value: govSettings[apiId]?.token || '' })
+    await master.put('settings', { key: api.enabledKey, value: String(govSettings[apiId]?.enabled || false) })
     showToast(`${apiId} settings saved`)
+  }
+
+  // Toggle the global government sandbox/demo mode
+  async function setGovSandbox(on) {
+    const { getMasterDB } = await import('../../db/multiTenantDB.js')
+    const master = await getMasterDB()
+    await master.put('settings', { key: 'govSandbox', value: String(on) })
+    setGovSandboxOn(on)
+    showToast(on ? 'Government sandbox (demo) mode ON' : 'Sandbox mode off — live APIs will be used')
   }
 
   async function testGovAPI(apiId) {
@@ -434,10 +451,34 @@ export default function IntegrationsPanel() {
       <div className="card">
         <div className="section-title">Government API Integrations</div>
         <p style={{ fontSize:13, color:'var(--c-text2)', marginBottom:14, lineHeight:1.6 }}>
-          Optional connections to Uganda's national systems (NIRA, UBOS, MoH, MoLG).
+          Optional connections to Uganda's national systems (NIRA, Immigration, UBOS, MoH, MoLG).
           Contact each ministry's IT department for API access credentials.
-          The system works fully without these — they add automatic data sharing.
+          The system works fully without these — they add automatic data sharing and ID verification.
         </p>
+
+        {/* Sandbox / demo mode toggle */}
+        <div style={{
+          display:'flex', justifyContent:'space-between', alignItems:'center', gap:12,
+          padding:'12px 14px', borderRadius:10, marginBottom:16,
+          background: govSandboxOn ? 'rgba(200,151,43,0.12)' : 'var(--c-surface2)',
+          border: `1px solid ${govSandboxOn ? 'var(--c-gold)' : 'var(--c-border)'}`,
+        }}>
+          <div style={{ flex:1 }}>
+            <div style={{ fontWeight:600, fontSize:13, color: govSandboxOn ? 'var(--c-gold-l)' : 'var(--c-text)' }}>
+              🧪 Demo / Sandbox verification mode
+            </div>
+            <div style={{ fontSize:12, color:'var(--c-text2)', lineHeight:1.5, marginTop:3 }}>
+              Simulates NIRA &amp; Immigration ID checks (format validation) so the verification
+              flow can be demonstrated without a live government MoU. Turn OFF for real API calls.
+              Remember to also tick "Enable" on NIRA / Immigration below.
+            </div>
+          </div>
+          <label style={{ display:'flex', alignItems:'center', cursor:'pointer' }}>
+            <input type="checkbox" checked={govSandboxOn}
+              onChange={e => setGovSandbox(e.target.checked)}
+              style={{ width:20, height:20, cursor:'pointer' }} />
+          </label>
+        </div>
 
         {GOV_INTEGRATION_LIST.map(api => (
           <div key={api.id} style={{

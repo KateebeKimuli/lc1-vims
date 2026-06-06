@@ -225,6 +225,24 @@ export function AuthProvider({ children }) {
   const userCanAccessRoute = (route) => user?.isMasterAdmin || (user ? canAccessRoute(user.role, route) : false)
   const userCanWrite       = (mod)   => user?.isMasterAdmin || (user ? canWrite(user.role, mod) : false)
 
+  // ── Village switcher for System Administrator ────────────────────────────
+  // Allows sysadmin to operate within any village's database without
+  // logging out. Updates the session so useVillageDB() picks up the change.
+  const switchVillage = (villageId, villageName, extraFields = {}) => {
+    if (!user?.isMasterAdmin) return  // only sysadmin can switch villages
+    const updated = {
+      ...user,
+      villageId,
+      villageName,
+      ...extraFields,
+    }
+    setUser(updated)
+    try {
+      const session = JSON.parse(sessionStorage.getItem('lc1_session') || '{}')
+      sessionStorage.setItem('lc1_session', JSON.stringify({ ...session, user: updated }))
+    } catch {}
+  }
+
   return (
     <AuthContext.Provider value={{
       user, village, login, logout, loading,
@@ -233,6 +251,7 @@ export function AuthProvider({ children }) {
       hasFullAccess:  userHasFullAccess,
       canAccessRoute: userCanAccessRoute,
       canWrite:       userCanWrite,
+      switchVillage,
     }}>
       {children}
     </AuthContext.Provider>

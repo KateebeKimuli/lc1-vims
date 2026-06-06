@@ -1,16 +1,15 @@
 {
   "name": "lc1-vims-sms-proxy",
-  "version": "1.0.0",
-  "description": "SMS proxy server for LC1 Village IMS — bridges the browser app to Africa's Talking",
+  "version": "2.0.0",
+  "description": "SMS proxy server for LC1 Village IMS - direct REST call to Africa's Talking (no SDK)",
   "main": "smsProxy.js",
   "scripts": {
     "start": "node smsProxy.js",
     "dev":   "node smsProxy.js"
   },
   "dependencies": {
-    "africastalking": "^0.7.0",
-    "cors":           "^2.8.5",
-    "dotenv":         "^16.0.0",
-    "express":        "^4.18.0"
+    "cors":    "^2.8.5",
+    "dotenv":  "^16.0.0",
+    "express": "^4.18.0"
   }
 }

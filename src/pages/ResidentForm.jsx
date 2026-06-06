@@ -59,6 +59,8 @@ import {
 } from '../db/multiTenantDB'
 import { BrowserMultiFormatReader } from '@zxing/library'
 import RichTextEditor               from '../components/shared/RichTextEditor'
+import { compressImage, compressFromFile, dataUrlSizeKB } from '../utils/imageCompress'
+import { verifyNIN, verifyPassport } from '../services/govApiService'
 import {
   DISTRICTS,
   getCountiesByDistrict, getSubcountiesByCounty,
@@ -355,6 +357,10 @@ export default function ResidentForm() {
   const [errors,     setErrors]     = useState({})
   const [ninChecking, setNinChecking] = useState(false)   // live NIN check status
   const [ninStatus,   setNinStatus]   = useState(null)    // null | 'ok' | 'conflict' | 'local'
+  const [moveCandidate, setMoveCandidate] = useState(null) // { resident, villageId, villageName } from another village
+  // Government verification (NIRA / Immigration) — ADDITIVE, runs alongside the duplicate check
+  const [verifying,   setVerifying]   = useState(false)
+  const [verifyResult, setVerifyResult] = useState(null)   // { kind:'nin'|'passport', verified, reason, sandbox }
 
   // Former village location selector state (for the cross-village lookup)
   const [fvDistrict,  setFvDistrict]  = useState('')
@@ -427,6 +433,7 @@ export default function ResidentForm() {
         const localMatch = local.find(r => r.nin === form.nin && r.id !== form.id)
         if (!cancelled && localMatch) {
           const isDeceased = localMatch.status === 'deceased'
+          setMoveCandidate(null)
           setNinStatus({
             level: 'block',
             msg: isDeceased
@@ -438,18 +445,36 @@ export default function ResidentForm() {
         }
 
         // Check across other villages
-        const cross = await checkNINAcrossVillages(form.nin, db.villageId, form.id)
+        const cross = await checkNINAcrossVillages(
+          form.nin,
+          (db.villageId === 'MASTER' || !db.villageId) ? '' : db.villageId,
+          form.id
+        )
         if (!cancelled) {
           if (cross.conflict) {
             const v          = cross.villages[0]
             const isDeceased = v.deceased || v.resident.status === 'deceased'
-            setNinStatus({
-              level: 'block',  // deceased is always a hard block
-              msg: isDeceased
-                ? `⚰ DECEASED: ${v.resident.surname} ${v.resident.firstName} in ${v.villageName} Village — this NIN is permanently blocked`
-                : `Found active in ${v.villageName} Village as ${v.resident.surname} ${v.resident.firstName} (status: ${v.resident.status})`,
-            })
+            if (isDeceased) {
+              // Deceased is always a hard block — never allow re-registration
+              setMoveCandidate(null)
+              setNinStatus({
+                level: 'block',
+                msg: `⚰ DECEASED: ${v.resident.surname} ${v.resident.firstName} in ${v.villageName} Village — this NIN is permanently blocked`,
+              })
+            } else {
+              // Alive in another village → offer to MOVE them here and autofill biodata
+              setMoveCandidate({
+                resident:    v.resident,
+                villageId:   v.villageId,
+                villageName: v.villageName,
+              })
+              setNinStatus({
+                level: 'warn',
+                msg: `Found in ${v.villageName} Village as ${v.resident.surname} ${v.resident.firstName} (status: ${v.resident.status}). You can move them here and auto-fill their details.`,
+              })
+            }
           } else {
+            setMoveCandidate(null)
             setNinStatus({ level: 'ok', msg: 'NIN not found in any village ✓' })
           }
           setNinChecking(false)
@@ -468,6 +493,107 @@ export default function ResidentForm() {
   function set(field, value) {
     setForm(f => ({ ...f, [field]: value }))
     if (errors[field]) setErrors(e => ({ ...e, [field]: '' }))
+  }
+
+  // ── Move a person from their former village & autofill their biodata ──────
+  // Copies all biographical fields from the former-village record into this
+  // form, sets the registration reason to a move, and records where they came
+  // from so the former village record can be marked 'migrated' on save.
+  function applyMoveCandidate() {
+    if (!moveCandidate?.resident) return
+    const r = moveCandidate.resident
+
+    setForm(f => ({
+      ...f,
+      // ── Identity / biodata (autofilled from former village) ──
+      surname:        r.surname        || '',
+      firstName:      r.firstName      || '',
+      otherNames:     r.otherNames     || '',
+      nin:            r.nin            || f.nin,
+      sex:            r.sex            || '',
+      dateOfBirth:    r.dateOfBirth    || '',
+      maritalStatus:  r.maritalStatus  || '',
+      tribe:          r.tribe          || '',
+      religion:       r.religion       || '',
+      nationality:    r.nationality    || 'Ugandan',
+      occupation:     r.occupation     || '',
+      // ── Contact ──
+      phone:          r.phone          || '',
+      phone2:         r.phone2         || '',
+      email:          r.email          || '',
+      // ── Biometrics & docs (carry over so they aren't recaptured) ──
+      photo:          r.photo          || '',
+      fingerprint:    r.fingerprint    || '',
+      passportNumber: r.passportNumber || '',
+      passportExpiry: r.passportExpiry || '',
+      passportCopy:   r.passportCopy   || '',
+      // ── Next of kin ──
+      nextOfKinName:     r.nextOfKinName     || '',
+      nextOfKinRelation: r.nextOfKinRelation || '',
+      nextOfKinPhone:    r.nextOfKinPhone    || '',
+      // ── Foreigner fields if any ──
+      permitType:     r.permitType     || '',
+      permitExpiry:   r.permitExpiry   || '',
+      // ── Mark this as a MOVE (relocation) from the former village ──
+      residentType:        'permanent',
+      registrationReason:  'relocation',
+      registrationReasonNote: `Relocated from ${moveCandidate.villageName} Village`,
+      // Former village info — formerVillageId drives the migration-on-save logic
+      formerVillageId:  moveCandidate.villageId,
+      formerVillage:    r.village    || moveCandidate.villageName || '',
+      formerParish:     r.parish     || '',
+      formerSubcounty:  r.subCounty  || '',
+      formerDistrict:   r.district   || '',
+      dateArrived:      new Date().toISOString().slice(0,10),
+    }))
+
+    // Clear the prompt; show confirmation
+    setNinStatus({
+      level: 'ok',
+      msg: `✓ Biodata auto-filled from ${moveCandidate.villageName}. On save, they'll be moved here and marked as migrated there.`,
+    })
+    setMoveCandidate(null)
+    showToast(`Biodata loaded from ${moveCandidate.villageName} Village`)
+  }
+
+  // ── Government verification (NIRA for NIN, Immigration for passport) ───────
+  // ADDITIVE: this does not replace the cross-village duplicate check — it
+  // runs as an extra confirmation that the ID is valid in national records.
+  async function verifyIdentity() {
+    const isForeigner = form.nationality && form.nationality.toLowerCase() !== 'ugandan'
+    setVerifying(true)
+    setVerifyResult(null)
+    try {
+      if (isForeigner) {
+        if (!form.passportNumber) {
+          setVerifyResult({ kind:'passport', verified:false, reason:'Enter a passport number first' })
+          return
+        }
+        const r = await verifyPassport(form.passportNumber, form.nationality)
+        setVerifyResult({ kind:'passport', ...r })
+        if (r.verified && r.data?.passportExpiry && !form.passportExpiry) {
+          set('passportExpiry', r.data.passportExpiry)
+        }
+      } else {
+        if (!form.nin || form.nin.length !== 14) {
+          setVerifyResult({ kind:'nin', verified:false, reason:'Enter a full 14-character NIN first' })
+          return
+        }
+        const r = await verifyNIN(form.nin)
+        setVerifyResult({ kind:'nin', ...r })
+        // If live NIRA returned biodata and fields are empty, offer to fill
+        if (r.verified && r.data && !r.sandbox) {
+          if (r.data.surname   && !form.surname)   set('surname', r.data.surname)
+          if (r.data.firstName && !form.firstName) set('firstName', r.data.firstName)
+          if (r.data.dateOfBirth && !form.dateOfBirth) set('dateOfBirth', r.data.dateOfBirth)
+          if (r.data.sex && !form.sex) set('sex', r.data.sex)
+        }
+      }
+    } catch (err) {
+      setVerifyResult({ verified:false, reason: err.message })
+    } finally {
+      setVerifying(false)
+    }
   }
 
   function phoneInput(field, value) {
@@ -565,11 +691,13 @@ export default function ResidentForm() {
   }
 
   // ── Comprehensive duplicate detection ─────────────────────────────────
-  // Checks BOTH the current village AND all other villages on this device.
-  // Returns an object describing what was found.
   async function checkAllDuplicates() {
-    const currentVillageId = db.villageId
-    const excludeId        = isEdit ? form.id : null
+    // Use '' as currentVillageId when sysadmin is in MASTER mode
+    // so ALL villages are checked (none are excluded as "current")
+    const currentVillageId = (db.villageId === 'MASTER' || !db.villageId)
+      ? ''
+      : db.villageId
+    const excludeId = isEdit ? form.id : null
 
     // ── 1. Within this village ──────────────────────────────────────────
     const localResidents = await db.getAll('residents')
@@ -1050,11 +1178,15 @@ export default function ResidentForm() {
   }
 
   // ── Webcam ────────────────────────────────────────────────────────────────
-  const capturePhoto = useCallback(() => {
+  const capturePhoto = useCallback(async () => {
     if (!webcamRef.current) return
-    set('photo', webcamRef.current.getScreenshot())
+    const raw = webcamRef.current.getScreenshot()
+    if (!raw) { showToast('Could not capture — try again', 'error'); return }
+    // Compress to passport size before storing (keeps DB + sync lean)
+    const small = await compressImage(raw, { maxSize: 400, quality: 0.8 })
+    set('photo', small)
     setCamOpen(false)
-    showToast('Photo captured')
+    showToast(`Photo captured (${dataUrlSizeKB(small)} KB)`)
   }, [webcamRef])
 
   // ── ID Scanner ────────────────────────────────────────────────────────────
@@ -1214,7 +1346,69 @@ export default function ResidentForm() {
                         {ninStatus.msg}
                       </div>
                     )}
+
+                    {/* Move-and-autofill prompt — when found alive in another village */}
+                    {!ninChecking && moveCandidate && (
+                      <div style={{
+                        marginTop:8, padding:'12px 14px', borderRadius:8,
+                        background:'rgba(93,173,226,0.1)', border:'1px solid rgba(93,173,226,0.4)',
+                      }}>
+                        <div style={{ fontSize:13, fontWeight:600, color:'var(--c-text)', marginBottom:4 }}>
+                          ⬇ Move this person to your village?
+                        </div>
+                        <div style={{ fontSize:12, color:'var(--c-text2)', lineHeight:1.6, marginBottom:10 }}>
+                          <strong>{moveCandidate.resident.surname} {moveCandidate.resident.firstName}</strong>{' '}
+                          is currently registered in <strong>{moveCandidate.villageName} Village</strong>.
+                          You can move them here — all their biodata, photo and fingerprint will be
+                          auto-filled, and their old village record will be marked as <em>migrated</em> when you save.
+                        </div>
+                        <div style={{ display:'flex', gap:8 }}>
+                          <button type="button" className="btn btn-primary btn-sm"
+                            onClick={applyMoveCandidate}>
+                            ⬇ Move here &amp; auto-fill
+                          </button>
+                          <button type="button" className="btn btn-secondary btn-sm"
+                            onClick={() => { setMoveCandidate(null); setNinStatus({ level:'block', msg:'This NIN is registered in another village. Move them or use a different NIN.' }) }}>
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
                     <Err field="nin" />
+
+                    {/* Government verification — additive check against NIRA / Immigration */}
+                    <div style={{ marginTop:8 }}>
+                      <button type="button" className="btn btn-secondary btn-sm"
+                        onClick={verifyIdentity} disabled={verifying}>
+                        {verifying
+                          ? '⏳ Verifying…'
+                          : (form.nationality && form.nationality.toLowerCase() !== 'ugandan')
+                            ? '🛂 Verify passport (Immigration)'
+                            : '🪪 Verify NIN (NIRA)'}
+                      </button>
+                      {verifyResult && (
+                        <div style={{
+                          marginTop:6, padding:'7px 11px', borderRadius:6, fontSize:12, lineHeight:1.5,
+                          background: verifyResult.verified === true ? 'rgba(45,122,79,0.1)'
+                                    : verifyResult.verified === false ? 'rgba(192,57,43,0.1)'
+                                    : 'rgba(200,151,43,0.1)',
+                          color:      verifyResult.verified === true ? 'var(--c-green-xl)'
+                                    : verifyResult.verified === false ? 'var(--c-red-l)'
+                                    : 'var(--c-gold-l)',
+                          border: `1px solid ${verifyResult.verified === true ? 'rgba(45,122,79,0.3)'
+                                    : verifyResult.verified === false ? 'rgba(192,57,43,0.3)'
+                                    : 'rgba(200,151,43,0.3)'}`,
+                        }}>
+                          {verifyResult.verified === true ? '✓ ' : verifyResult.verified === false ? '✕ ' : 'ℹ '}
+                          {verifyResult.reason || (verifyResult.verified ? 'Verified' : 'Not verified')}
+                          {verifyResult.sandbox && (
+                            <span style={{ display:'block', fontSize:10, opacity:0.8, marginTop:2 }}>
+                              Demo mode — connect the live government API in Settings → SMS &amp; APIs for real verification.
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                   <div className="form-group">
                     <label className="form-label">Nationality</label>
@@ -1321,18 +1515,30 @@ export default function ResidentForm() {
                               onChange={async e => {
                                 const file = e.target.files[0]
                                 if (!file) return
-                                if (file.size > 3 * 1024 * 1024) {
-                                  alert('File too large — maximum 3MB. Please compress the image.')
+                                if (file.size > 8 * 1024 * 1024) {
+                                  alert('File too large — maximum 8MB.')
                                   return
                                 }
-                                const reader = new FileReader()
-                                reader.onload = ev => set('passportCopy', ev.target.result)
-                                reader.readAsDataURL(file)
+                                try {
+                                  if (file.type === 'application/pdf') {
+                                    // PDFs can't be image-compressed — store as-is
+                                    const reader = new FileReader()
+                                    reader.onload = ev => set('passportCopy', ev.target.result)
+                                    reader.readAsDataURL(file)
+                                  } else {
+                                    // Compress passport photos/scans (slightly larger than profile pic)
+                                    const small = await compressFromFile(file, { maxSize: 900, quality: 0.82 })
+                                    set('passportCopy', small)
+                                    showToast(`Passport copy added (${dataUrlSizeKB(small)} KB)`)
+                                  }
+                                } catch {
+                                  showToast('Could not read file', 'error')
+                                }
                               }} />
                           </label>
                         )}
                         <div style={{ fontSize:11, color:'var(--c-text3)', marginTop:4 }}>
-                          Accepted: JPG, PNG, PDF · Max 3MB
+                          Accepted: JPG, PNG, PDF · auto-compressed to save space
                         </div>
                       </div>
                     </div>
@@ -1715,7 +1921,17 @@ export default function ResidentForm() {
                       <label className="btn btn-secondary btn-sm" style={{ cursor:'pointer', textAlign:'center' }}>
                         📁 Upload photo
                         <input type="file" accept="image/*" style={{ display:'none' }}
-                          onChange={e => { const f = e.target.files[0]; if (!f) return; const r = new FileReader(); r.onload = ev => set('photo', ev.target.result); r.readAsDataURL(f) }} />
+                          onChange={async e => {
+                        const f = e.target.files[0]
+                        if (!f) return
+                        try {
+                          const small = await compressFromFile(f, { maxSize: 400, quality: 0.8 })
+                          set('photo', small)
+                          showToast(`Photo added (${dataUrlSizeKB(small)} KB)`)
+                        } catch {
+                          showToast('Could not read photo', 'error')
+                        }
+                      }} />
                       </label>
                     </>
                   ) : (

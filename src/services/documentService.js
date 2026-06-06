@@ -42,9 +42,40 @@
  */
 
 import { jsPDF } from 'jspdf'
-import { savePDFDoc, FOLDERS } from './documentStorage.js'
+import { savePDFDoc, saveDocument, FOLDERS } from './documentStorage.js'
 import { stripHtml } from '../components/shared/RichTextEditor'
 import { format } from 'date-fns'
+
+// Helper: convert an image URL/blob to a data URL usable by jsPDF.addImage
+async function toDataUrl(src) {
+  if (!src) return null
+  if (typeof src !== 'string') return null
+  if (src.startsWith('data:')) return src
+  try {
+    const res = await fetch(src)
+    const blob = await res.blob()
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result)
+      reader.onerror = () => reject(new Error('Failed to read image blob'))
+      reader.readAsDataURL(blob)
+    })
+  } catch {
+    return null
+  }
+}
+
+// Draws a simple placeholder box where a photo would be
+function drawPhotoPlaceholder(doc, x, y, w, h, label = 'NO PHOTO') {
+  doc.setDrawColor(180)
+  doc.setLineWidth(0.6)
+  doc.roundedRect(x, y, w, h, 2, 2)
+  doc.setFont('helvetica', 'bold')
+  doc.setFontSize(8)
+  doc.setTextColor(140)
+  doc.text(label, x + w / 2, y + h / 2 - 2, { align: 'center' })
+  doc.setTextColor(0)
+}
 
 // ── PDF page constants ─────────────────────────────────────────────────────
 const PAGE_W     = 210          // A4 width in mm
@@ -60,22 +91,30 @@ const CENTER     = PAGE_W / 2   // horizontal centre
 // and 'helvetica' for header elements (modern, readable)
 
 /**
- * loadLogoFromSettings()
+ * loadLogoFromSettings(user)
  * Retrieves the stored logo base64 string from IndexedDB.
  * Returns null if no logo has been uploaded.
  */
-async function loadLogoFromSettings() {
+async function loadLogoFromSettings(user = null) {
   try {
-    const { getDB } = await import('../db/index.js')
-    const db        = await getDB()
-    const entry     = await db.get('settings', 'officialLogo')
-    if (entry?.value) return entry.value
-
-    // Fall back to the embedded default logo (works fully offline)
+    // Prefer village-specific stored logo (if present)
+    if (user?.villageId && user.villageId !== 'MASTER') {
+      try {
+        const { getVillageDB } = await import('../db/multiTenantDB.js')
+        const vdb = await getVillageDB(user.villageId)
+        const entry = await vdb.get('settings', 'officialLogo')
+        if (entry?.value) return entry.value.startsWith('data:') ? entry.value : await toDataUrl(entry.value)
+      } catch {}
+    }
+    // Logo is stored centrally in the master DB — same for all villages
+    const { getMasterDB } = await import('../db/multiTenantDB.js')
+    const masterDB = await getMasterDB()
+    const entry    = await masterDB.get('settings', 'officialLogo')
+    if (entry?.value) return entry.value.startsWith('data:') ? entry.value : await toDataUrl(entry.value)
+    // Fallback: embedded default logo
     const { OFFICIAL_LOGO_BASE64 } = await import('../assets/officialLogo.js')
     return OFFICIAL_LOGO_BASE64
   } catch {
-    // If all else fails return null — document will render without logo
     return null
   }
 }
@@ -129,6 +168,41 @@ async function loadSettingsMap(user = null) {
   return s
 }
 
+// Helper: load a resident record by id, trying user's village first then falling back
+async function fetchResidentById(residentId, user = null) {
+  if (!residentId) return null
+  try {
+    // Try user's village DB first
+    if (user?.villageId && user.villageId !== 'MASTER') {
+      try {
+        const { getVillageDB } = await import('../db/multiTenantDB.js')
+        const vdb = await getVillageDB(user.villageId)
+        const r = await vdb.get('residents', residentId)
+        if (r) return r
+      } catch {}
+    }
+    // Fallback: try legacy DB
+    try {
+      const { getDB } = await import('../db/index.js')
+      const db = await getDB()
+      const r = await db.get('residents', residentId)
+      if (r) return r
+    } catch {}
+  } catch {}
+  return null
+}
+
+// Helper: returns data URL for resident photo if present
+async function loadResidentPhotoDataUrl(resident, user = null) {
+  if (!resident) return null
+  const photoSrc = resident.photo || resident.photoData || null
+  if (!photoSrc) return null
+  try {
+    const data = await toDataUrl(photoSrc) || photoSrc
+    return data
+  } catch { return null }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // CORE LETTERHEAD RENDERER
 // Draws the letterhead on the current page. Called once per page.
@@ -149,7 +223,7 @@ async function loadSettingsMap(user = null) {
  * @param {string|null} logo    - base64 logo data URL or null
  * @returns {number}            - Y position after the letterhead
  */
-function drawLetterhead(doc, settings, logo) {
+async function drawLetterhead(doc, settings, logo) {
   const village    = settings.villageName    || 'Village'
   const parish     = settings.parishName     || 'Parish'
   const subcounty  = settings.subCountyName  || settings.subcountyName || 'Sub-county'
@@ -158,11 +232,13 @@ function drawLetterhead(doc, settings, logo) {
 
   // ── Logo or fallback crest ─────────────────────────────────────────────
   if (logo) {
+    // Ensure we have a data URL (convert remote/blob URLs if necessary)
+    const logoData = await toDataUrl(logo) || logo
     // Detect format from data URL prefix
-    const fmt = logo.startsWith('data:image/png') ? 'PNG' : 'JPEG'
+    const fmt = (logoData && logoData.startsWith && logoData.startsWith('data:image/png')) ? 'PNG' : 'JPEG'
     // Place logo in top-left, 32mm wide × 32mm tall
     try {
-      doc.addImage(logo, fmt, MARGIN_L, 8, 32, 32)
+      doc.addImage(logoData, fmt, MARGIN_L, 8, 32, 32)
     } catch {
       // If image fails to render, draw placeholder box
       doc.setDrawColor(150)
@@ -359,12 +435,15 @@ function drawSignatureBlock(doc, signerName, designation, date, startY) {
  * @param {object} user   - the logged-in user (for signature block)
  */
 export async function generateOfficialLetter(letter, user) {
-  const [settings, logo] = await Promise.all([loadSettingsMap(user), loadLogoFromSettings()])
+  // Open a blank window synchronously to preserve user gesture for popup
+  let _win = null
+  try { _win = window.open('', '_blank') } catch {}
+  const [settings, logo] = await Promise.all([loadSettingsMap(user), loadLogoFromSettings(user)])
   const doc    = new jsPDF({ unit: 'mm', format: 'a4' })
   const today  = format(new Date(letter.issuedAt || letter.createdAt || Date.now()), 'dd MMMM yyyy')
 
   // ── Letterhead ─────────────────────────────────────────────────────────
-  let y = drawLetterhead(doc, settings, logo)
+  let y = await drawLetterhead(doc, settings, logo)
 
   // ── Reference + Date line ──────────────────────────────────────────────
   doc.setFont('helvetica', 'normal')
@@ -393,6 +472,26 @@ export async function generateOfficialLetter(letter, user) {
     doc.text(letter.recipient, MARGIN_L + 10, y)
     y += 8
   }
+
+  // ── Resident photo (if linked) — top-right
+  try {
+    const resId = letter.residentId || letter.resident?.id
+    let resident = letter.resident || null
+    if (!resident && resId) resident = await fetchResidentById(resId, user)
+    const photoX = MARGIN_R - 32
+    const photoY = 8
+    const photoW = 32
+    const photoH = 32
+    const photoData = await loadResidentPhotoDataUrl(resident, user)
+    if (photoData) {
+      const fmt = (photoData && photoData.startsWith && photoData.startsWith('data:image/png')) ? 'PNG' : 'JPEG'
+      try { doc.addImage(photoData, fmt, photoX, photoY, photoW, photoH) } catch { drawPhotoPlaceholder(doc, photoX, photoY, photoW, photoH) }
+    } else {
+      drawPhotoPlaceholder(doc, photoX, photoY, photoW, photoH)
+    }
+    // Ensure subsequent content starts below the photo (header area)
+    y = Math.max(y, 8 + 32 + 6)
+  } catch {}
 
   // ── Salutation ─────────────────────────────────────────────────────────
   doc.setFont('times', 'normal')
@@ -426,7 +525,7 @@ export async function generateOfficialLetter(letter, user) {
     const fitsCount = Math.floor((PAGE_H - 70 - y) / 6)
     doc.text(lines.slice(0, fitsCount), MARGIN_L, y)
     doc.addPage()
-    drawLetterhead(doc, settings, logo)
+    await drawLetterhead(doc, settings, logo)
     drawFooter(doc, letter.referenceNumber, 2)
     y = 60
     doc.text(lines.slice(fitsCount), MARGIN_L, y)
@@ -461,7 +560,14 @@ export async function generateOfficialLetter(letter, user) {
     format(new Date(), 'yyyyMMdd'),
   ].filter(Boolean).join('_') + '.pdf'
 
-  await savePDFDoc(doc, filename, FOLDERS.LETTERS, settings.villageName)
+  const blob = doc.output('blob')
+  await saveDocument(blob, filename, FOLDERS.LETTERS, settings.villageName)
+  try {
+    const url = URL.createObjectURL(blob)
+    if (_win) _win.location = url
+    else window.open(url, '_blank')
+    setTimeout(() => URL.revokeObjectURL(url), 60000)
+  } catch {}
 }
 
 /**
@@ -480,11 +586,14 @@ export async function generateResidentProfile(resident, user) {
     districtName:  resident.district   || user.districtName   || '',
     subcountyName: resident.subCounty  || user.subcountyName  || '',
   } : user
-  const [settings, logo] = await Promise.all([loadSettingsMap(effectiveUser), loadLogoFromSettings()])
+  // Open a blank window synchronously to preserve user gesture for popup
+  let _win = null
+  try { _win = window.open('', '_blank') } catch {}
+  const [settings, logo] = await Promise.all([loadSettingsMap(effectiveUser), loadLogoFromSettings(user)])
   const doc   = new jsPDF({ unit: 'mm', format: 'a4' })
   const today = format(new Date(), 'dd MMMM yyyy')
 
-  let y = drawLetterhead(doc, settings, logo)
+  let y = await drawLetterhead(doc, settings, logo)
 
   // Title
   doc.setFont('helvetica', 'bold')
@@ -493,12 +602,21 @@ export async function generateResidentProfile(resident, user) {
   y += 10
 
   // Photo (if available) — top right
-  if (resident.photo) {
-    try {
-      const fmt = resident.photo.startsWith('data:image/png') ? 'PNG' : 'JPEG'
-      doc.addImage(resident.photo, fmt, MARGIN_R - 35, y - 8, 30, 36)
-    } catch { /* photo failed */ }
+  const photoX = MARGIN_R - 32
+  const photoY = 8
+  const photoW = 32
+  const photoH = 32
+  let profPhotoData = null
+  if (resident.photo) profPhotoData = await toDataUrl(resident.photo) || resident.photo
+  if (!profPhotoData) profPhotoData = await loadResidentPhotoDataUrl(resident, effectiveUser)
+  if (profPhotoData) {
+    const fmt = (profPhotoData && profPhotoData.startsWith && profPhotoData.startsWith('data:image/png')) ? 'PNG' : 'JPEG'
+    try { doc.addImage(profPhotoData, fmt, photoX, photoY, photoW, photoH) } catch { drawPhotoPlaceholder(doc, photoX, photoY, photoW, photoH) }
+  } else {
+    drawPhotoPlaceholder(doc, photoX, photoY, photoW, photoH)
   }
+  // Ensure biodata fields don't overlap the photo (header area)
+  y = Math.max(y, 8 + 32 + 6)
 
   // ── Biodata fields in two-column layout ────────────────────────────────
   doc.setFont('times', 'normal')
@@ -579,7 +697,14 @@ export async function generateResidentProfile(resident, user) {
   drawFooter(doc, `RESIDENT/${resident.id?.slice(0,8).toUpperCase()}`)
 
   const filename = `LC1_Resident_${resident.surname}_${resident.nin || resident.id?.slice(0,8)}_${format(new Date(),'yyyyMMdd')}.pdf`
-  await savePDFDoc(doc, filename, FOLDERS.PROFILES, settings.villageName)
+  const blob = doc.output('blob')
+  await saveDocument(blob, filename, FOLDERS.PROFILES, settings.villageName)
+  try {
+    const url = URL.createObjectURL(blob)
+    if (_win) _win.location = url
+    else window.open(url, '_blank')
+    setTimeout(() => URL.revokeObjectURL(url), 60000)
+  } catch {}
 }
 
 /**
@@ -587,11 +712,14 @@ export async function generateResidentProfile(resident, user) {
  * Official birth confirmation document on letterhead.
  */
 export async function generateBirthCertificate(birth, user) {
-  const [settings, logo] = await Promise.all([loadSettingsMap(user), loadLogoFromSettings()])
+  // Open blank window now to preserve user gesture for popup
+  let _win = null
+  try { _win = window.open('', '_blank') } catch {}
+  const [settings, logo] = await Promise.all([loadSettingsMap(user), loadLogoFromSettings(user)])
   const doc   = new jsPDF({ unit: 'mm', format: 'a4' })
   const today = format(new Date(), 'dd MMMM yyyy')
 
-  let y = drawLetterhead(doc, settings, logo)
+  let y = await drawLetterhead(doc, settings, logo)
 
   doc.setFont('helvetica', 'bold')
   doc.setFontSize(14)
@@ -605,8 +733,29 @@ export async function generateBirthCertificate(birth, user) {
   doc.text(introLines, MARGIN_L, y)
   y += introLines.length * 6 + 6
 
+  // Child photo if available (birth record may reference a resident or photo)
+  try {
+    const childResId = birth.residentId || birth.childResidentId
+    let child = null
+    if (childResId) child = await fetchResidentById(childResId, user)
+    // birth may also include a direct photo field
+    const photoSrc = birth.photo || (child && (child.photo || child.photoData))
+    const photoX = MARGIN_R - 32
+    const photoY = 8
+    const photoW = 32
+    const photoH = 32
+    const photoData = await toDataUrl(photoSrc) || photoSrc
+    if (photoData) {
+      const fmt = (photoData && photoData.startsWith && photoData.startsWith('data:image/png')) ? 'PNG' : 'JPEG'
+      try { doc.addImage(photoData, fmt, photoX, photoY, photoW, photoH) } catch { drawPhotoPlaceholder(doc, photoX, photoY, photoW, photoH) }
+    } else {
+      drawPhotoPlaceholder(doc, photoX, photoY, photoW, photoH)
+    }
+    y = Math.max(y, 8 + 32 + 6)
+  } catch {}
+
   const BFIELDS = [
-    ['Child\'s full name', birth.childName  || '—'],
+    ['Child\'s full name', [birth.childSurname, birth.childName].filter(Boolean).join(' ') || birth.childName || '—'],
     ['Date of birth',     birth.dateOfBirth  ? format(new Date(birth.dateOfBirth), 'dd MMMM yyyy') : '—'],
     ['Sex',               birth.sex          || '—'],
     ['Weight at birth',   birth.weight       ? `${birth.weight} kg` : '—'],
@@ -633,10 +782,35 @@ export async function generateBirthCertificate(birth, user) {
   y += 6
   const signerName  = settings.chairName || user?.fullName || 'LC1 Chairperson'
   const designation = `LC1 Chairperson — ${settings.villageName || ''} Village`
+  // For death certificates, include photo of deceased if available
+  try {
+    const photoX = MARGIN_R - 32
+    const photoY = 8
+    const photoW = 32
+    const photoH = 32
+    const photoData = await loadResidentPhotoDataUrl(deceased, user)
+    if (photoData) {
+      const fmt = (photoData && photoData.startsWith && photoData.startsWith('data:image/png')) ? 'PNG' : 'JPEG'
+      try { doc.addImage(photoData, fmt, photoX, photoY, photoW, photoH) } catch { drawPhotoPlaceholder(doc, photoX, photoY, photoW, photoH) }
+    } else {
+      drawPhotoPlaceholder(doc, photoX, photoY, photoW, photoH)
+    }
+    // Ensure signature block starts below the photo (header area)
+    y = Math.max(y, 8 + 32 + 8)
+  } catch {}
+
   drawSignatureBlock(doc, signerName, designation, today, y)
   drawFooter(doc, `BIRTH/${birth.id?.slice(0,8).toUpperCase()}`)
 
-  await savePDFDoc(doc, `LC1_Birth_Certificate_${birth.childName?.replace(/\s+/g,'_')}_${format(new Date(),'yyyyMMdd')}.pdf`, FOLDERS.BIRTH_CERTS, settings.villageName)
+  const birthFilename = `LC1_Birth_Certificate_${(birth.childName||birth.childSurname||'Unknown').replace(/\s+/g,'_')}_${format(new Date(),'yyyyMMdd')}.pdf`
+  const birthBlob = doc.output('blob')
+  await saveDocument(birthBlob, birthFilename, FOLDERS.BIRTH_CERTS, settings.villageName)
+  try {
+    const url = URL.createObjectURL(birthBlob)
+    if (_win) _win.location = url
+    else window.open(url, '_blank')
+    setTimeout(() => URL.revokeObjectURL(url), 60000)
+  } catch {}
 }
 
 /**
@@ -644,11 +818,14 @@ export async function generateBirthCertificate(birth, user) {
  * Official death registration document on letterhead.
  */
 export async function generateDeathCertificate(death, deceased, user) {
-  const [settings, logo] = await Promise.all([loadSettingsMap(user), loadLogoFromSettings()])
+  // Open blank window now to preserve user gesture for popup
+  let _win = null
+  try { _win = window.open('', '_blank') } catch {}
+  const [settings, logo] = await Promise.all([loadSettingsMap(user), loadLogoFromSettings(user)])
   const doc   = new jsPDF({ unit: 'mm', format: 'a4' })
   const today = format(new Date(), 'dd MMMM yyyy')
 
-  let y = drawLetterhead(doc, settings, logo)
+  let y = await drawLetterhead(doc, settings, logo)
 
   doc.setFont('helvetica', 'bold')
   doc.setFontSize(14)
@@ -694,7 +871,15 @@ export async function generateDeathCertificate(death, deceased, user) {
   drawSignatureBlock(doc, signerName, designation, today, y)
   drawFooter(doc, `DEATH/${death.id?.slice(0,8).toUpperCase()}`)
 
-  await savePDFDoc(doc, `LC1_Death_Certificate_${death.deceasedName?.replace(/\s+/g,'_')}_${format(new Date(),'yyyyMMdd')}.pdf`, FOLDERS.DEATH_CERTS, settings.villageName)
+  const deathFilename = `LC1_Death_Certificate_${(death.deceasedName||'Unknown').replace(/\s+/g,'_')}_${format(new Date(),'yyyyMMdd')}.pdf`
+  const deathBlob = doc.output('blob')
+  await saveDocument(deathBlob, deathFilename, FOLDERS.DEATH_CERTS, settings.villageName)
+  try {
+    const url = URL.createObjectURL(deathBlob)
+    if (_win) _win.location = url
+    else window.open(url, '_blank')
+    setTimeout(() => URL.revokeObjectURL(url), 60000)
+  } catch {}
 }
 
 /**
@@ -702,11 +887,11 @@ export async function generateDeathCertificate(death, deceased, user) {
  * Statistical population report for submission to UBOS / MoLG.
  */
 export async function generatePopulationReport(stats, residents, user) {
-  const [settings, logo] = await Promise.all([loadSettingsMap(user), loadLogoFromSettings()])
+  const [settings, logo] = await Promise.all([loadSettingsMap(user), loadLogoFromSettings(user)])
   const doc   = new jsPDF({ unit: 'mm', format: 'a4' })
   const today = format(new Date(), 'dd MMMM yyyy')
 
-  let y = drawLetterhead(doc, settings, logo)
+  let y = await drawLetterhead(doc, settings, logo)
 
   doc.setFont('helvetica', 'bold')
   doc.setFontSize(13)

@@ -53,22 +53,97 @@ export default function ReportsPage() {
     residentType: 'all', status: 'active', nationality: 'all',
   })
 
-  useEffect(() => { load() }, [db.villageId])
+  // ── Sysadmin cross-village scope ──────────────────────────────────────────
+  // 'all' = every village · 'district:Kampala' = one district · 'village:V123' = one village
+  const isSysadmin = !!user?.isMasterAdmin
+  const [scope,        setScope]        = useState('all')
+  const [allVillages,  setAllVillages]  = useState([])   // [{ villageId, villageName, districtName }]
+  const [scopeLabel,   setScopeLabel]   = useState('All villages')
+
+  // Load the village list once for sysadmin (for the scope selector)
+  useEffect(() => {
+    if (!isSysadmin) return
+    import('../db/multiTenantDB').then(({ getRegisteredVillages }) =>
+      getRegisteredVillages().then(setAllVillages).catch(() => {})
+    )
+  }, [isSysadmin])
+
+  useEffect(() => { load() }, [db.villageId, scope, isSysadmin])
+
+  // Distinct districts across all villages (for the district filter)
+  const districts = useMemo(() => {
+    const set = new Set(allVillages.map(v => v.districtName).filter(Boolean))
+    return [...set].sort()
+  }, [allVillages])
 
   async function load() {
     setLoading(true)
     try {
-      const [res, b, d, c, w, hh, biz, land, meetings, letters, security] = await Promise.all([
-        db.getAll('residents'), db.getAll('births'),    db.getAll('deaths'),
-        db.getAll('cases'),     db.getAll('welfare'),   db.getAll('households'),
-        db.getAll('businesses'),db.getAll('land'),      db.getAll('meetings'),
-        db.getAll('letters'),   db.getAll('security'),
-      ])
-      setResidents(res); setBirths(b); setDeaths(d); setCases(c)
-      setWelfare(w); setHouseholds(hh); setBusinesses(biz)
-      setLandRecords(land); setMeetings(meetings); setLetters(letters); setSecurity(security)
-    } catch (err) { showToast('Error loading data: ' + err.message, 'error') }
-    finally { setLoading(false) }
+      const STORES = ['residents','births','deaths','cases','welfare','households','businesses','land','meetings','letters','security']
+
+      // ── Village admin (or sysadmin viewing a single village via switcher) ──
+      // Load only the current village DB — the normal, restricted path.
+      if (!isSysadmin) {
+        const [res, b, d, c, w, hh, biz, land, meetings, letters, security] = await Promise.all(
+          STORES.map(s => db.getAll(s))
+        )
+        setResidents(res); setBirths(b); setDeaths(d); setCases(c)
+        setWelfare(w); setHouseholds(hh); setBusinesses(biz)
+        setLandRecords(land); setMeetings(meetings); setLetters(letters); setSecurity(security)
+        setScopeLabel(user?.villageName ? `${user.villageName} Village` : 'Your village')
+        return
+      }
+
+      // ── Sysadmin: aggregate across the selected scope ─────────────────────
+      const { getRegisteredVillages, getVillageDB } = await import('../db/multiTenantDB')
+      const villages = await getRegisteredVillages()
+
+      // Decide which villages fall inside the chosen scope
+      let inScope = villages
+      let label   = 'All villages'
+      if (scope.startsWith('village:')) {
+        const vid = scope.slice(8)
+        inScope = villages.filter(v => v.villageId === vid)
+        label   = (inScope[0]?.villageName || 'Village') + ' Village'
+      } else if (scope.startsWith('district:')) {
+        const dist = scope.slice(9)
+        inScope = villages.filter(v => v.districtName === dist)
+        label   = `${dist} District (${inScope.length} village${inScope.length !== 1 ? 's' : ''})`
+      } else {
+        label = `All villages (${villages.length})`
+      }
+      setScopeLabel(label)
+
+      // Merge every store across all in-scope villages, tagging each record
+      // with its source village so per-village breakdowns are possible.
+      const merged = {}
+      STORES.forEach(s => { merged[s] = [] })
+
+      for (const v of inScope) {
+        try {
+          const vdb = await getVillageDB(v.villageId)
+          const results = await Promise.all(STORES.map(s => vdb.getAll(s).catch(() => [])))
+          STORES.forEach((s, i) => {
+            const tagged = results[i].map(rec => ({
+              ...rec,
+              _villageId:   v.villageId,
+              _villageName: v.villageName,
+              _districtName: v.districtName,
+            }))
+            merged[s] = merged[s].concat(tagged)
+          })
+        } catch { /* village DB not on this device */ }
+      }
+
+      setResidents(merged.residents); setBirths(merged.births); setDeaths(merged.deaths)
+      setCases(merged.cases); setWelfare(merged.welfare); setHouseholds(merged.households)
+      setBusinesses(merged.businesses); setLandRecords(merged.land)
+      setMeetings(merged.meetings); setLetters(merged.letters); setSecurity(merged.security)
+    } catch (err) {
+      showToast('Error loading data: ' + err.message, 'error')
+    } finally {
+      setLoading(false)
+    }
   }
 
   // ── Computed analytics ────────────────────────────────────────────────
@@ -301,12 +376,76 @@ export default function ReportsPage() {
     </div>
   )
 
+  // ── Per-village breakdown (sysadmin multi-village view) ───────────────────
+  const villageBreakdown = (() => {
+    if (!isSysadmin) return []
+    const map = {}
+    const bump = (vid, vname, dist, key) => {
+      if (!vid) return
+      if (!map[vid]) map[vid] = {
+        villageId: vid, villageName: vname || vid, districtName: dist || '',
+        residents: 0, active: 0, births: 0, deaths: 0, cases: 0, land: 0, businesses: 0,
+      }
+      map[vid][key]++
+    }
+    residents.forEach(r => {
+      bump(r._villageId, r._villageName, r._districtName, 'residents')
+      if (r.status === 'active') bump(r._villageId, r._villageName, r._districtName, 'active')
+    })
+    births.forEach(r => bump(r._villageId, r._villageName, r._districtName, 'births'))
+    deaths.forEach(r => bump(r._villageId, r._villageName, r._districtName, 'deaths'))
+    cases.forEach(r => bump(r._villageId, r._villageName, r._districtName, 'cases'))
+    landRecords.forEach(r => bump(r._villageId, r._villageName, r._districtName, 'land'))
+    businesses.forEach(r => bump(r._villageId, r._villageName, r._districtName, 'businesses'))
+    return Object.values(map).sort((a, b) => b.active - a.active)
+  })()
+
   return (
     <div className="page">
       <PageHeader
         title="Reports & Analytics"
-        sub={`${user?.villageName || ''} Village · ${format(new Date(),'dd MMMM yyyy')}`}
+        sub={isSysadmin
+          ? `${scopeLabel} · ${format(new Date(),'dd MMMM yyyy')}`
+          : `${user?.villageName || ''} Village · ${format(new Date(),'dd MMMM yyyy')}`}
       />
+
+      {/* Sysadmin cross-village scope selector */}
+      {isSysadmin && (
+        <div className="card" style={{
+          marginBottom:20, display:'flex', flexWrap:'wrap', gap:14, alignItems:'flex-end',
+          borderLeft:'4px solid var(--c-gold)',
+        }}>
+          <div style={{ flex:1, minWidth:200 }}>
+            <div style={{ fontSize:11, color:'var(--c-gold-l)', fontWeight:700, textTransform:'uppercase', letterSpacing:'0.05em', marginBottom:6 }}>
+              🔧 System Admin — reporting scope
+            </div>
+            <div style={{ fontSize:12, color:'var(--c-text2)', lineHeight:1.5 }}>
+              Choose what these reports cover. You can view every village combined,
+              a single district, or one village.
+            </div>
+          </div>
+          <div className="form-group" style={{ minWidth:240, marginBottom:0 }}>
+            <label className="form-label">Scope</label>
+            <select className="form-select" value={scope} onChange={e => setScope(e.target.value)}>
+              <option value="all">🌍 All villages ({allVillages.length})</option>
+              {districts.length > 0 && (
+                <optgroup label="By district">
+                  {districts.map(d => (
+                    <option key={d} value={`district:${d}`}>🏘 {d} District</option>
+                  ))}
+                </optgroup>
+              )}
+              <optgroup label="By village">
+                {allVillages.map(v => (
+                  <option key={v.villageId} value={`village:${v.villageId}`}>
+                    📍 {v.villageName}{v.districtName ? ` (${v.districtName})` : ''}
+                  </option>
+                ))}
+              </optgroup>
+            </select>
+          </div>
+        </div>
+      )}
 
       {/* Tab bar */}
       <div className="tabs" style={{ marginBottom:28 }}>
@@ -358,6 +497,63 @@ export default function ReportsPage() {
               color="#e17055" icon="🛡️"
               sub={`${security.filter(s=>s.status==='resolved').length} resolved`} />
           </div>
+
+          {/* Per-village breakdown — sysadmin viewing more than one village */}
+          {isSysadmin && villageBreakdown.length > 1 && (
+            <div className="card">
+              <div className="section-title">
+                📊 Breakdown by village ({villageBreakdown.length} villages)
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Village</th><th>District</th>
+                      <th style={{textAlign:'right'}}>Active</th>
+                      <th style={{textAlign:'right'}}>Total</th>
+                      <th style={{textAlign:'right'}}>Births</th>
+                      <th style={{textAlign:'right'}}>Deaths</th>
+                      <th style={{textAlign:'right'}}>Cases</th>
+                      <th style={{textAlign:'right'}}>Land</th>
+                      <th style={{textAlign:'right'}}>Business</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {villageBreakdown.map(v => (
+                      <tr key={v.villageId}
+                        style={{ cursor:'pointer' }}
+                        onClick={() => setScope(`village:${v.villageId}`)}
+                        title="Click to view this village only">
+                        <td style={{ fontWeight:600 }}>📍 {v.villageName}</td>
+                        <td style={{ color:'var(--c-text3)', fontSize:12 }}>{v.districtName || '—'}</td>
+                        <td style={{ textAlign:'right', fontWeight:700, color:'var(--c-green-xl)' }}>{v.active}</td>
+                        <td style={{ textAlign:'right' }}>{v.residents}</td>
+                        <td style={{ textAlign:'right' }}>{v.births}</td>
+                        <td style={{ textAlign:'right' }}>{v.deaths}</td>
+                        <td style={{ textAlign:'right' }}>{v.cases}</td>
+                        <td style={{ textAlign:'right' }}>{v.land}</td>
+                        <td style={{ textAlign:'right' }}>{v.businesses}</td>
+                      </tr>
+                    ))}
+                    {/* Totals row */}
+                    <tr style={{ borderTop:'2px solid var(--c-border2)', fontWeight:700 }}>
+                      <td>TOTAL</td><td></td>
+                      <td style={{ textAlign:'right', color:'var(--c-green-xl)' }}>{villageBreakdown.reduce((s,v)=>s+v.active,0)}</td>
+                      <td style={{ textAlign:'right' }}>{villageBreakdown.reduce((s,v)=>s+v.residents,0)}</td>
+                      <td style={{ textAlign:'right' }}>{villageBreakdown.reduce((s,v)=>s+v.births,0)}</td>
+                      <td style={{ textAlign:'right' }}>{villageBreakdown.reduce((s,v)=>s+v.deaths,0)}</td>
+                      <td style={{ textAlign:'right' }}>{villageBreakdown.reduce((s,v)=>s+v.cases,0)}</td>
+                      <td style={{ textAlign:'right' }}>{villageBreakdown.reduce((s,v)=>s+v.land,0)}</td>
+                      <td style={{ textAlign:'right' }}>{villageBreakdown.reduce((s,v)=>s+v.businesses,0)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ fontSize:11, color:'var(--c-text3)', marginTop:8 }}>
+                Tip: click any village row to drill into that village's full reports.
+              </div>
+            </div>
+          )}
 
           {/* Two column charts */}
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:20 }}>

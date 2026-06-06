@@ -48,7 +48,7 @@ import {
 } from '../data/ugandaLocations'
 import {
   isVillageSetup, setupVillage,
-  verifyAndUseResetToken, resetUserPassword
+  verifyAndUseResetToken, resetUserPassword, recoverUsernameByPhone
 } from '../db/multiTenantDB.js'
 import MoLGLogo from '../assets/MoLGLogo'
 
@@ -59,6 +59,7 @@ const FLOW = {
   FIRST_SETUP:    'first_setup',
   MASTER_LOGIN:   'master_login',
   RESET_PASSWORD: 'reset_password',
+  FORGOT_USERNAME: 'forgot_username',
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -646,6 +647,12 @@ export default function LoginPage() {
                 🔑 Forgot password
               </button>
             </div>
+            <div style={{ marginTop:8 }}>
+              <button type="button" className="btn btn-secondary btn-sm" style={{ width:'100%' }}
+                onClick={() => goToFlow(FLOW.FORGOT_USERNAME)}>
+                👤 Forgot username
+              </button>
+            </div>
           </Card>
         )}
 
@@ -706,7 +713,64 @@ export default function LoginPage() {
           </Card>
         )}
 
-        {/* ══ FLOW: MASTER_LOGIN ══ */}
+        {/* ══ FLOW: FORGOT_USERNAME ══ */}
+        {flow === FLOW.FORGOT_USERNAME && (
+          <Card maxW={460}>
+            <h2 style={{ fontSize:18, marginBottom:4 }}>Recover username</h2>
+            <p style={{ color:'var(--c-text2)', fontSize:13, marginBottom:16, lineHeight:1.6 }}>
+              Enter the phone number registered with your committee account.
+              If it matches our records, we'll show your username.
+            </p>
+            <LocationBadge {...locationBadgeProps} />
+
+            {error   && <ErrBox msg={error} />}
+            {success && <SucBox msg={success} />}
+
+            <form onSubmit={async (e) => {
+              e.preventDefault()
+              setError(''); setSuccess(''); setInfo('')
+              const phone = document.getElementById('recoverPhone')?.value?.trim()
+              if (!phone) { setError('Enter your phone number'); return }
+              if (!sel.villageId) { setError('Select your village first'); return }
+              setLoading(true)
+              try {
+                const res = await recoverUsernameByPhone(sel.villageId, phone)
+                if (res.found) {
+                  setSuccess(
+                    `Your username is "${res.username}"` +
+                    (res.multiple ? ' (note: more than one account uses this phone — contact your chairperson if this is not yours).' : '.')
+                  )
+                } else {
+                  setError('No active account found with that phone number in this village. Contact your LC1 Chairperson for help.')
+                }
+              } catch (err) {
+                setError(err.message || 'Lookup failed')
+              } finally {
+                setLoading(false)
+              }
+            }}>
+              <div className="form-group">
+                <label className="form-label">Registered phone number</label>
+                <input className="form-input" id="recoverPhone"
+                  type="tel" inputMode="tel" placeholder="07XXXXXXXX" autoFocus />
+              </div>
+              <div style={{ display:'flex', gap:8, marginTop:4 }}>
+                <button type="button" className="btn btn-secondary"
+                  onClick={() => { setError(''); setSuccess(''); goToFlow(FLOW.CREDENTIALS) }}>← Back</button>
+                <button type="submit" className="btn btn-primary" style={{ flex:1 }} disabled={loading}>
+                  {loading ? 'Searching…' : 'Recover username'}
+                </button>
+              </div>
+            </form>
+
+            {success && (
+              <button className="btn btn-gold btn-sm" style={{ width:'100%', marginTop:12 }}
+                onClick={() => { setError(''); setSuccess(''); goToFlow(FLOW.CREDENTIALS) }}>
+                Continue to login →
+              </button>
+            )}
+          </Card>
+        )}
         {flow === FLOW.MASTER_LOGIN && (
           <Card maxW={400}>
             <div style={{ textAlign:'center', marginBottom:20 }}>

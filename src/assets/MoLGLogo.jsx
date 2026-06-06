@@ -30,6 +30,15 @@ export default function MoLGLogo({ size = 48, className = '' }) {
     // Load any user-uploaded logo from IndexedDB
     async function loadCustom() {
       try {
+        // Prefer centrally stored master logo (sysadmin upload)
+        try {
+          const { getMasterDB } = await import('../db/multiTenantDB.js')
+          const mdb = await getMasterDB()
+          const mEntry = await mdb.get('settings', 'officialLogo')
+          if (mEntry?.value) { setCustomLogo(mEntry.value); setLoaded(true); return }
+        } catch {}
+
+        // Fallback to local DB (village-specific uploaded logo)
         const { getDB } = await import('../db/index.js')
         const db    = await getDB()
         const entry = await db.get('settings', 'officialLogo')

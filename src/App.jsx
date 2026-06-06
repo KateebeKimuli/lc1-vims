@@ -1,19 +1,9 @@
-/**
- * ============================================================
- * ROOT ROUTER — src/App.jsx  (v2)
- * ============================================================
- * Updated:
- *   - Initialises the sync engine on startup
- *   - Protected route uses RBAC: restricted roles are redirected
- *     away from routes they cannot access
- * ============================================================
- */
-
 import { useEffect }                      from 'react'
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { useAuth }                        from './hooks/useAuth'
 import { initSyncEngine }                 from './sync/syncEngine'
 import Layout                             from './components/layout/Layout'
+import VillageGuard                       from './components/shared/VillageGuard'
 import LoginPage                          from './pages/LoginPage'
 import Dashboard                          from './pages/Dashboard'
 import ResidentsPage                      from './pages/ResidentsPage'
@@ -34,17 +24,13 @@ import AuditPage                          from './pages/AuditPage'
 import SettingsPage                       from './pages/SettingsPage'
 
 // ── Initialise sync engine once on app load ────────────────────────────────
-// Must be called before any sync operations. Sets up online/offline
-// listeners and schedules background sync every 5 minutes.
 initSyncEngine()
 
+// ── Village-aware wrapper — shows village picker for sysadmin ─────────────
+// All village-specific pages are wrapped so sysadmin MUST select a village first
+const V = ({ children }) => <VillageGuard>{children}</VillageGuard>
+
 // ── Protected route wrapper ────────────────────────────────────────────────
-/**
- * Guards a route:
- *   1. If not logged in → redirect to /login
- *   2. If logged in but role cannot access this route → redirect to /
- *   3. Otherwise → render children
- */
 function Protected({ children }) {
   const { user, loading, canAccessRoute } = useAuth()
   const location = useLocation()
@@ -58,48 +44,37 @@ function Protected({ children }) {
     )
   }
 
-  // Not logged in
   if (!user) return <Navigate to="/login" replace />
-
-  // Logged in but no access to this specific route
-  if (!canAccessRoute(location.pathname)) {
-    return <Navigate to="/" replace />
-  }
-
+  if (!canAccessRoute(location.pathname)) return <Navigate to="/" replace />
   return children
 }
 
 // ── App ────────────────────────────────────────────────────────────────────
 export default function App() {
-  // Auto-start Supabase sync when user logs in
-  // The sync is started by the AuthProvider when a village session is restored
-
   const { user } = useAuth()
   return (
     <Routes>
-      {/* Public */}
       <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
 
-      {/* Protected shell */}
       <Route path="/" element={<Protected><Layout /></Protected>}>
-        <Route index                  element={<Dashboard />} />
-        <Route path="residents"       element={<Protected><ResidentsPage /></Protected>} />
-        <Route path="residents/new"   element={<Protected><ResidentForm /></Protected>} />
-        <Route path="residents/:id"   element={<Protected><ResidentProfile /></Protected>} />
-        <Route path="residents/:id/edit" element={<Protected><ResidentForm /></Protected>} />
-        <Route path="households"      element={<Protected><HouseholdsPage /></Protected>} />
-        <Route path="land"            element={<Protected><LandPage /></Protected>} />
-        <Route path="cases"           element={<Protected><CasesPage /></Protected>} />
-        <Route path="meetings"        element={<Protected><MeetingsPage /></Protected>} />
-        <Route path="births"          element={<Protected><BirthsPage /></Protected>} />
-        <Route path="deaths"          element={<Protected><DeathsPage /></Protected>} />
-        <Route path="letters"         element={<Protected><LettersPage /></Protected>} />
-        <Route path="welfare"         element={<Protected><WelfarePage /></Protected>} />
-        <Route path="businesses"      element={<Protected><BusinessesPage /></Protected>} />
-        <Route path="security"        element={<Protected><SecurityPage /></Protected>} />
-        <Route path="reports"         element={<Protected><ReportsPage /></Protected>} />
-        <Route path="audit"           element={<Protected><AuditPage /></Protected>} />
-        <Route path="settings"        element={<Protected><SettingsPage /></Protected>} />
+        <Route index                     element={<Dashboard />} />
+        <Route path="residents"          element={<Protected><V><ResidentsPage /></V></Protected>} />
+        <Route path="residents/new"      element={<Protected><V><ResidentForm /></V></Protected>} />
+        <Route path="residents/:id"      element={<Protected><V><ResidentProfile /></V></Protected>} />
+        <Route path="residents/:id/edit" element={<Protected><V><ResidentForm /></V></Protected>} />
+        <Route path="households"         element={<Protected><V><HouseholdsPage /></V></Protected>} />
+        <Route path="land"               element={<Protected><V><LandPage /></V></Protected>} />
+        <Route path="cases"              element={<Protected><V><CasesPage /></V></Protected>} />
+        <Route path="meetings"           element={<Protected><V><MeetingsPage /></V></Protected>} />
+        <Route path="births"             element={<Protected><V><BirthsPage /></V></Protected>} />
+        <Route path="deaths"             element={<Protected><V><DeathsPage /></V></Protected>} />
+        <Route path="letters"            element={<Protected><V><LettersPage /></V></Protected>} />
+        <Route path="welfare"            element={<Protected><V><WelfarePage /></V></Protected>} />
+        <Route path="businesses"         element={<Protected><V><BusinessesPage /></V></Protected>} />
+        <Route path="security"           element={<Protected><V><SecurityPage /></V></Protected>} />
+        <Route path="reports"            element={<Protected><ReportsPage /></Protected>} />
+        <Route path="audit"              element={<Protected><AuditPage /></Protected>} />
+        <Route path="settings"           element={<Protected><SettingsPage /></Protected>} />
       </Route>
 
       <Route path="*" element={<Navigate to="/" replace />} />

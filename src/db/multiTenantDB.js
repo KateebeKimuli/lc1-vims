@@ -47,7 +47,8 @@ import { hashPassword } from '../security/crypto.js'
 const MASTER_DB_NAME  = 'lc1-master'          // system admin + village registry
 const villageDBName   = (id) => `lc1-village-${id}`  // per-village data
 
-const DB_VERSION = 1
+// Bump version to ensure upgrade() runs when adding new object stores
+const DB_VERSION = 2
 
 // ─────────────────────────────────────────────────────────────────────────
 // MASTER DATABASE (system admin, village registry, password resets)
@@ -96,6 +97,12 @@ export async function getMasterDB() {
         a.createIndex('villageId', 'villageId')
         a.createIndex('action',    'action')
         a.createIndex('timestamp', 'timestamp')
+      }
+
+      // ── MASTER SETTINGS ──────────────────────────────────────────────
+      // Central settings used by system admin (e.g., officialLogo)
+      if (!db.objectStoreNames.contains('settings')) {
+        db.createObjectStore('settings', { keyPath: 'key' })
       }
     }
   })
@@ -467,6 +474,73 @@ export async function checkNameDOBAcrossVillages(
  * Master admin generates a one-time reset token for a village official.
  * Token expires in 24 hours. Returns the token string to give to the user.
  */
+/**
+ * recoverUsernameByPhone(villageId, phone)
+ * Self-service username recovery. Looks up an active committee member
+ * in the given village whose stored phone number matches.
+ * Returns a MASKED username for privacy (e.g. "ad***n") plus the full
+ * username only if exactly one match — caller decides how much to show.
+ * Returns { found, username, fullName } or { found:false }.
+ */
+export async function recoverUsernameByPhone(villageId, phone) {
+  if (!villageId || !phone) return { found: false }
+  // Normalise: keep digits only, compare last 9 digits (handles +256/0 prefixes)
+  const norm = (p) => (p || '').replace(/\D/g, '').slice(-9)
+  const target = norm(phone)
+  if (target.length < 9) return { found: false }
+
+  try {
+    const vdb   = await getVillageDB(villageId)
+    const users = await vdb.getAll('users')
+    const matches = users.filter(u =>
+      u.userStatus === 'active' && norm(u.phone) === target
+    )
+    if (matches.length === 0) return { found: false }
+    // If multiple share a phone, return the first but flag it
+    const u = matches[0]
+    return {
+      found: true,
+      username: u.username,
+      fullName: u.fullName,
+      multiple: matches.length > 1,
+    }
+  } catch {
+    return { found: false }
+  }
+}
+
+/**
+ * generateResetTokenByEmail(villageId, email)
+ * Admin-assisted recovery: finds the member by their registered email,
+ * then generates a reset token for them. Returns { found, token, username,
+ * fullName, expiresAt } or { found:false }.
+ */
+export async function generateResetTokenByEmail(villageId, email) {
+  if (!villageId || !email) return { found: false }
+  const target = email.trim().toLowerCase()
+
+  try {
+    const vdb   = await getVillageDB(villageId)
+    const users = await vdb.getAll('users')
+    const u = users.find(x =>
+      x.userStatus === 'active' && (x.email || '').trim().toLowerCase() === target
+    )
+    if (!u) return { found: false }
+
+    const token = await generateResetToken(villageId, u.username)
+    return {
+      found:    true,
+      token,
+      username: u.username,
+      fullName: u.fullName,
+      email:    u.email,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    }
+  } catch {
+    return { found: false }
+  }
+}
+
 export async function generateResetToken(villageId, username) {
   const db    = await getMasterDB()
   // Generate a random 8-character token (easy to type/communicate verbally)

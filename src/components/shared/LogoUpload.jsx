@@ -22,6 +22,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { useToast, Toast }             from './Toast'
+import { compressImage }               from '../../utils/imageCompress'
 
 // Max file size: 2MB in bytes
 const MAX_SIZE = 2 * 1024 * 1024
@@ -113,10 +114,17 @@ export default function LogoUpload({ currentLogo, onLogoChange, settings }) {
       return
     }
 
-    // Convert to base64 data URL
+    // Convert to base64, then compress (logos stay crisp at 500px for print)
     const reader = new FileReader()
-    reader.onload = (e) => {
-      const dataUrl = e.target.result
+    reader.onload = async (e) => {
+      const raw = e.target.result
+      // PNG logos often have transparency — keep PNG to preserve it; else JPEG
+      const isPng = file.type === 'image/png'
+      const dataUrl = await compressImage(raw, {
+        maxSize: 500,
+        quality: 0.9,
+        mime: isPng ? 'image/png' : 'image/jpeg',
+      })
       setPreview(dataUrl)
       onLogoChange(dataUrl)
       showToast('Logo uploaded successfully')

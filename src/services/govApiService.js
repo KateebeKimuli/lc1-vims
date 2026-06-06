@@ -54,6 +54,9 @@ const GOV_APIS = {
   DHIS2: 'https://hmis.health.go.ug/api',
   MoLG:  'https://api.molg.go.ug/v1',
   IFMS:  'https://efms.finance.go.ug/api',
+  // Ministry of Internal Affairs — Directorate of Citizenship & Immigration
+  // (passport / foreign-national verification)
+  IMMIGRATION: 'https://api.immigration.go.ug/v1',
 }
 
 // Timeout for all government API calls (they can be slow)
@@ -65,17 +68,35 @@ const GOV_API_TIMEOUT = 20000  // 20 seconds
 
 /**
  * getGovConfig(apiName)
- * Reads the API token for a specific government system from settings.
- * Returns null if not configured.
+ * Reads the API token for a specific government system.
+ * Settings are stored centrally in the master DB (with legacy fallback).
+ * Returns null if not configured/enabled.
+ *
+ * Also returns sandbox:true when the global gov sandbox mode is on — this
+ * lets the system demonstrate verification at the showcase without live
+ * government API credentials (which require a formal MoU with each ministry).
  */
 async function getGovConfig(apiName) {
   try {
-    const { getDB } = await import('../db/index.js')
-    const db        = await getDB()
-    const token     = (await db.get('settings', `govToken_${apiName}`))?.value
-    const enabled   = (await db.get('settings', `govEnabled_${apiName}`))?.value === 'true'
+    const { getMasterDB } = await import('../db/multiTenantDB.js')
+    const master = await getMasterDB()
+    let token   = (await master.get('settings', `govToken_${apiName}`))?.value
+    let enabled = (await master.get('settings', `govEnabled_${apiName}`))?.value === 'true'
+    let sandbox = (await master.get('settings', 'govSandbox'))?.value === 'true'
+
+    // Legacy fallback
+    if (token === undefined) {
+      const { getDB } = await import('../db/index.js')
+      const db = await getDB()
+      token   = token   ?? (await db.get('settings', `govToken_${apiName}`))?.value
+      enabled = enabled || (await db.get('settings', `govEnabled_${apiName}`))?.value === 'true'
+    }
+
+    // In sandbox mode the integration is considered "configured" even without
+    // a real token, so the demo flow works end to end.
+    if (sandbox && enabled) return { token: token || 'SANDBOX', baseUrl: GOV_APIS[apiName], sandbox: true }
     if (!token || !enabled) return null
-    return { token, baseUrl: GOV_APIS[apiName] }
+    return { token, baseUrl: GOV_APIS[apiName], sandbox: false }
   } catch { return null }
 }
 
@@ -137,6 +158,25 @@ export async function verifyNIN(nin) {
     return { verified: null, reason: 'NIRA not configured — manual entry only' }
   }
 
+  // ── SANDBOX / DEMO MODE ─────────────────────────────────────────────────
+  // Simulates a NIRA lookup so the verification flow can be demonstrated
+  // without a live government MoU. A NIN is treated as valid if it matches
+  // the official Uganda NIN format: starts with C (citizen) or other letter,
+  // followed by alphanumerics, 14 chars total. Clearly flagged as simulated.
+  if (config.sandbox) {
+    await new Promise(r => setTimeout(r, 700))  // mimic network latency
+    const formatOk = /^[A-Z]{1,3}[0-9A-Z]{11,13}$/i.test(nin)
+    if (!formatOk) {
+      return { verified: false, sandbox: true, reason: 'Invalid NIN format (simulated NIRA check)' }
+    }
+    return {
+      verified: true,
+      sandbox:  true,
+      reason:   '✓ Format valid — SIMULATED NIRA verification (sandbox mode)',
+      data: { nationality: 'Ugandan' },  // real data only comes from live NIRA
+    }
+  }
+
   if (!navigator.onLine) {
     return { verified: null, reason: 'Offline — NIN verification skipped' }
   }
@@ -161,6 +201,74 @@ export async function verifyNIN(nin) {
       sex:         p.sex         || p.gender     || '',
       nationality: p.nationality || 'Ugandan',
       photo:       p.photo       || null,  // base64 if available
+    }
+  }
+}
+
+/**
+ * verifyPassport(passportNumber, nationality)
+ * Verifies a foreign national's passport against the Ministry of Internal
+ * Affairs / Directorate of Citizenship & Immigration Control.
+ *
+ * Returns:
+ *   { verified: true,  data: {...} }
+ *   { verified: false, reason }
+ *   { verified: null,  reason }  (not configured / offline)
+ *
+ * @param {string} passportNumber
+ * @param {string} nationality - country of the passport holder
+ */
+export async function verifyPassport(passportNumber, nationality = '') {
+  const pp = (passportNumber || '').trim()
+  if (!pp || pp.length < 5) {
+    return { verified: false, reason: 'Passport number too short' }
+  }
+
+  const config = await getGovConfig('IMMIGRATION')
+  if (!config) {
+    return { verified: null, reason: 'Immigration API not configured — manual entry only' }
+  }
+
+  // ── SANDBOX / DEMO MODE ─────────────────────────────────────────────────
+  if (config.sandbox) {
+    await new Promise(r => setTimeout(r, 700))
+    // Most passports are 6–9 alphanumeric characters
+    const formatOk = /^[A-Z0-9]{6,9}$/i.test(pp)
+    if (!formatOk) {
+      return { verified: false, sandbox: true, reason: 'Invalid passport format (simulated Immigration check)' }
+    }
+    return {
+      verified: true,
+      sandbox:  true,
+      reason:   `✓ Format valid — SIMULATED Immigration verification (sandbox mode)`,
+      data: { nationality: nationality || 'Foreign national' },
+    }
+  }
+
+  if (!navigator.onLine) {
+    return { verified: null, reason: 'Offline — passport verification skipped' }
+  }
+
+  const result = await govRequest(
+    `${config.baseUrl}/passports/${encodeURIComponent(pp)}`,
+    config.token
+  )
+
+  if (!result.success) {
+    return { verified: false, reason: `Immigration check failed: ${result.error}` }
+  }
+
+  const p = result.data
+  return {
+    verified: true,
+    data: {
+      surname:       p.surname     || p.familyName || '',
+      firstName:     p.firstName   || p.givenName  || '',
+      nationality:   p.nationality || nationality  || '',
+      dateOfBirth:   p.dateOfBirth || p.dob        || '',
+      sex:           p.sex         || p.gender     || '',
+      passportExpiry:p.expiryDate  || p.expiry     || '',
+      photo:         p.photo       || null,
     }
   }
 }
@@ -405,6 +513,13 @@ export async function syncVillageDataToMoLG(villageId, stats, villageProfile) {
 export async function testGovIntegration(apiName) {
   const config = await getGovConfig(apiName)
   if (!config) return { ok: false, error: 'Not configured' }
+
+  // Sandbox mode always "passes" — it's a simulated connection for demos
+  if (config.sandbox) {
+    await new Promise(r => setTimeout(r, 400))
+    return { ok: true, latencyMs: 400, sandbox: true, error: null }
+  }
+
   if (!navigator.onLine) return { ok: false, error: 'Device is offline' }
 
   const start  = Date.now()
@@ -429,6 +544,14 @@ export const GOV_INTEGRATION_LIST = [
     website:     'https://nira.go.ug',
     tokenKey:    'govToken_NIRA',
     enabledKey:  'govEnabled_NIRA',
+  },
+  {
+    id:          'IMMIGRATION',
+    name:        'Internal Affairs — Passport Verification',
+    description: 'Verifies foreign nationals\' passports via the Directorate of Citizenship & Immigration Control.',
+    website:     'https://immigration.go.ug',
+    tokenKey:    'govToken_IMMIGRATION',
+    enabledKey:  'govEnabled_IMMIGRATION',
   },
   {
     id:          'UBOS',
